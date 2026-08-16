@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from model.hydro.data import HydroDataset, collate_hydro_samples
+from model.hydro.physics import load_physical_config
 from model.models import HydroTransformer
 from model.training.checkpoint import load_checkpoint
 from model.training.trainer import (
@@ -150,6 +151,13 @@ def main() -> None:
     if not isinstance(model_config, dict):
         raise ValueError("checkpoint 缺少 resolved model_config。")
     metadata = checkpoint.get("checkpoint_metadata", {})
+    physical_payload = metadata.get("physical_config")
+    if not isinstance(physical_payload, dict):
+        raise ValueError(
+            "checkpoint 缺少双状态 physical_config；这是旧版单 Token 模型，"
+            "请使用当前代码重新训练。"
+        )
+    physical_config = load_physical_config(physical_payload)
     dataset_path, input_csv_path, output_dir = _resolve_evaluation_paths(
         args, metadata
     )
@@ -164,6 +172,7 @@ def main() -> None:
         dataset_path,
         input_csv_path=input_csv_path,
         negative_target_policy=negative_target_policy,
+        physical_config=physical_config,
     )
     indices, evaluation_scope = _select_evaluation_indices(
         dataset, metadata, args.external_data
@@ -192,6 +201,7 @@ def main() -> None:
         "dataset_path": str(dataset_path),
         "input_csv_path": str(input_csv_path),
         "negative_target_policy": negative_target_policy,
+        "physical_config": physical_config.to_dict(),
         "sample_count": int(indices.size),
         "source_indices": [
             int(dataset[int(index)]["source_index"]) for index in indices

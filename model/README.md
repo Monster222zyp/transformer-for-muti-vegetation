@@ -30,13 +30,19 @@ py -3.11 -m model.prepare_dataset
 默认数据文件是 `model/data/all_models.csv`。数据加载器会把一行转换为：
 
 - `positions [N,2]`：N 株有效水草的二维无量纲坐标，相邻格点距离为 1；
-- `single_drag [N]`：当前统一为 1 的孤立单株阻力；
+- `plant_state [N]`：每株水草的状态编号；`0/120/240°` 为状态 1，`60/180/300°` 为状态 2；
+- `single_drag [N]`：按“状态 × 当前流速”读取的孤立单株基准阻力；
 - `global_features [1]`：流速 U；
 - `target_drag`：用于训练的 `max(FX_0, 0)`；
 - `raw_target_drag`：未经截断的原始 `FX_0`，仅供审计；
-- `model_id`、`angle`、`flow_speed`、`source_index`：不送入网络的追踪信息。
+- `state_id`、`model_id`、`angle`、`flow_speed`、`source_index`：用于状态选择和结果追踪的元数据。
 
 一个 batch 内的植株数不同，因此 `collate_hydro_samples` 会做动态 padding（补齐到该 batch 的最大植株数），并用 `plant_mask` 标记真实植株。padding 不参与 attention 或阻力求和。
+
+物理测量得到的单根默认阻力写在 `model/configs/physical.yaml`。该文件分别保存
+状态 1/2 在 `0.1、0.2、0.3、0.4 m/s` 下的八个正式实验阻力值，单位为 `N`。
+训练会严格拒绝缺失流速、非正数、重复角度或错误单位。两个状态始终使用不同的
+可学习初始 Token，以区分两种角度状态的相互作用特征。
 
 流速标准化必须只使用当前训练 fold 的均值和标准差。每折的统计保存在 `fold_N/scaler.json`；评估时直接从 checkpoint 恢复，禁止使用测试集重新计算。
 
@@ -55,9 +61,9 @@ py -3.11 -m model.train --mode overfit --max-epochs 300 `
   --resume-checkpoint model/artifacts/overfit/last.pt
 ```
 
-checkpoint 会内嵌当前最优模型，因此也可以把 `last.pt` 恢复到另一个
-`--artifact-dir`；新目录会立即生成自己的 `best.pt`。恢复时会比较 checkpoint 保存的
-完整模型配置与当前模型，避免把权重误载入结构不同的网络。
+`last.pt` 不再重复内嵌最优模型；恢复时会从它原目录的轻量 `best.pt` 读取最佳权重，
+因此也可以恢复到另一个 `--artifact-dir`，并在新目录重建 `best.pt`。恢复时会比较
+checkpoint 保存的完整模型配置与当前模型，避免把权重误载入结构不同的网络。
 
 正式的5折交叉验证与全量重训：
 
@@ -76,7 +82,15 @@ py -3.11 -m model.train --mode cv `
   --device auto --batch-size 32 --max-epochs 500 --seed 20260814
 ```
 
-更完整的默认值位于 `model/configs/base.yaml`。CLI 参数优先于 YAML。优化器为 AdamW，loss 是总体相互作用系数 `C = D_total / sum(single_drag)` 的 MSE；学习率先线性 warmup，再 cosine 衰减，同时执行梯度范数裁剪。
+更完整的默认值位于 `model/configs/base.yaml`。CLI 参数优先于 YAML。优化器为 AdamW：CUDA 训练启用 fused 实现，CPU 自动回退普通实现。训练使用稳定化目标相对 MSE：
+
+```text
+mean(((predicted_drag - target_drag) / max(abs(target_drag), relative_floor))^2)
+```
+
+`relative_floor` 是当前训练子集中所有正 `target_drag` 的 5% 分位数。每个 fold 只使用自己的 train 索引拟合一次，validation 和 test 直接复用，不能参与统计；Overfit 使用前 32 条训练样本拟合，final 重训使用全部训练数据拟合。这样小阻力样本按相对偏差参与优化，同时避免 4 个零标签发生除零。若训练子集没有正标签，训练会直接报错。学习率先线性 warmup，再 cosine 衰减，同时执行梯度范数裁剪。`C` 仍作为评估指标输出，但不参与训练 loss。
+
+训练开始时会先打印当前 overfit/fold 的样本数和实际 `relative_floor`。之后每 10 个 epoch 在 terminal 输出一次：当前 epoch、`train_relative_mse`、`validation_relative_mse` 和学习率。若 early stopping 发生在非 10 倍数位置，还会额外打印停止时的 loss。间隔可通过 `training.progress_interval_epochs` 调整。
 
 ## 5. 独立评估
 
@@ -101,9 +115,11 @@ py -3.11 -m model.evaluate `
   --external-data
 ```
 
-训练 checkpoint 保存了数据、构型文件、负标签策略和 held-out source indices。未显式
+训练 checkpoint 保存了数据、构型文件、负标签策略、完整物理阻力表、相对 loss 名称、实际 `relative_floor`、分位数策略和 held-out source indices。未显式
 提供 `--data` 或 `--input-csv` 时，评估入口自动复用这些绝对路径；显式 CLI 相对路径则
-始终按当前工作目录解释。
+始终按当前工作目录解释。评估优先使用 checkpoint 内嵌的物理表，而不是重新读取当前
+磁盘上的 `physical.yaml`，因此修改实测值不会改变历史 checkpoint 的含义。旧单 Token
+checkpoint 不支持双状态输入，必须重新训练。同属当前双状态结构、但使用旧绝对 MSE 训练的 checkpoint 仍可加载做推理；由于优化目标不同，训练器会拒绝用它恢复新训练。
 
 评估输出包括：
 
@@ -116,7 +132,11 @@ MAPE（平均绝对百分比误差）不能除以零，所以只统计 `target_d
 
 ## 6. 训练产物与测试
 
-`model/artifacts/` 默认被 Git 忽略。主要产物有配置快照、fold 分配表、scaler、`best.pt`、`last.pt`、最终 checkpoint、训练历史、逐样本预测、逐株系数和指标汇总。
+`model/artifacts/` 默认被 Git 忽略。主要产物有配置快照、fold 分配表、scaler、`best.pt`、`last.pt`、最终 checkpoint、`history.json`、`history.csv`、逐样本预测、逐株系数和指标汇总。`history.csv` 的列为 `epoch`、`train_relative_mse`、`validation_relative_mse` 和 `learning_rate`。`best.pt` 是轻量评估 checkpoint，只含模型权重、scaler、配置、最佳 epoch/loss 和评估范围信息；`last.pt` 才含 optimizer、scheduler 和 history，用于断点续训。所有 checkpoint 都记录实际使用的相对分母。默认每 100 个 epoch 更新 `last.pt`，最终 epoch 与 early stopping 时强制保存。
+
+checkpoint 先写入带进程 PID 和随机标识的唯一临时文件，再原子替换正式文件。Windows 短暂锁定目标文件时会按 0.2、0.5、1、2 秒自动重试；全部失败时，终端会显示完整临时文件路径，并保留该可恢复文件，不会删除或覆盖它。
+
+每个 `fold_N/` 和 `overfit/` 目录还会生成 `loss_curve.png`：横轴是 epoch，纵轴是稳定化相对 MSE loss，两条折线分别表示训练集和验证集。常规采样点间隔为 10 个 epoch；若训练在非 10 倍数处提前停止，图中会额外保留最后一个 epoch。采样间隔可通过 `training.loss_plot_interval_epochs` 调整。全量 final 重训没有验证集，因此只在 terminal 输出训练 loss，不生成伪造的双折线验证图。
 
 运行不含完整训练的快速测试：
 

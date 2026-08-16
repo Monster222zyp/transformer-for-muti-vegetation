@@ -11,6 +11,7 @@ from torch import Tensor
 from torch.utils.data import Dataset
 
 from .geometry import build_layout_index, layout_to_positions, parse_layout
+from .physics import PhysicalConfig, load_physical_config
 
 
 DATASET_COLUMNS = (
@@ -38,6 +39,8 @@ class HydroDataset(Dataset[dict[str, Any]]):
         dtype: 浮点张量类型，默认使用训练稳定且常见的 ``torch.float32``。
         negative_target_policy: 负标签处理策略；当前仅支持 ``clamp_to_zero``，即把
             负 ``FX_0`` 的训练标签设为零，同时完整保留原始标签用于审计。
+        physical_config: 物理配置文件路径、配置字典、已解析的 ``PhysicalConfig``，
+            或 ``None``。``None`` 会读取 ``model/configs/physical.yaml``。
 
     每个样本保留原始 ``FX_0``，同时提供归零负值后的训练标签 ``target_drag``。
     """
@@ -48,6 +51,7 @@ class HydroDataset(Dataset[dict[str, Any]]):
         input_csv_path: str | Path,
         dtype: torch.dtype = torch.float32,
         negative_target_policy: str = "clamp_to_zero",
+        physical_config: str | Path | dict[str, Any] | PhysicalConfig | None = None,
     ) -> None:
         # 策略属于训练语义，必须先于任何文件访问进行校验。这样配置拼写错误不会
         # 被后续的路径错误掩盖，更不会在用户不知情时退回某个默认处理方式。
@@ -62,6 +66,9 @@ class HydroDataset(Dataset[dict[str, Any]]):
         self.input_csv_path = Path(input_csv_path).resolve()
         self.dtype = dtype
         self.negative_target_policy = negative_target_policy
+        # 物理参数在读取样本前完成一次严格解析。Dataset 保存解析后的不可变对象，
+        # 因此每行数据只做常数时间查表，不会反复读取 YAML 文件。
+        self.physical_config = load_physical_config(physical_config)
         self.layout_index = build_layout_index(self.input_csv_path)
         self.samples = self._load_samples()
 
@@ -97,6 +104,13 @@ class HydroDataset(Dataset[dict[str, Any]]):
                 if plant_count == 0:
                     raise ValueError(f"总 CSV 第 {csv_line_number} 行没有任何水草。")
 
+                # 同一工况的所有水草朝向状态相同。状态由构型反查角度决定，单株阻力
+                # 则进一步由当前流速选择；二者都不依赖 CSV 中额外的人工作标记。
+                state_id = self.physical_config.state_for_angle(angle)
+                single_drag_value = self.physical_config.single_drag_for(
+                    state_id, numeric["flow_speed"]
+                )
+
                 raw_target = numeric["FX_0"]
                 # 构造函数已经拒绝全部未知策略，因此此处可以明确执行当前唯一协议。
                 # raw_target_drag 始终使用变换前的值，保证异常值仍可在预测表中追踪。
@@ -107,7 +121,13 @@ class HydroDataset(Dataset[dict[str, Any]]):
                 samples.append(
                     {
                         "positions": positions,
-                        "single_drag": torch.ones(plant_count, dtype=self.dtype),
+                        "plant_state": torch.full(
+                            (plant_count,), state_id, dtype=torch.long
+                        ),
+                        "state_id": state_id,
+                        "single_drag": torch.full(
+                            (plant_count,), single_drag_value, dtype=self.dtype
+                        ),
                         "plant_mask": torch.ones(plant_count, dtype=torch.bool),
                         "global_features": torch.tensor([numeric["flow_speed"]], dtype=self.dtype),
                         "target_drag": torch.tensor(target, dtype=self.dtype),
@@ -138,8 +158,9 @@ def collate_hydro_samples(samples: Sequence[dict[str, Any]]) -> dict[str, Tensor
         samples: ``HydroDataset`` 返回的一个或多个样本。
 
     返回：
-        ``positions`` 为 ``[B,Nmax,2]``，``single_drag`` 和 ``plant_mask`` 为
-        ``[B,Nmax]``；其他浮点特征和可追踪元数据均按批次堆叠。
+        ``positions`` 为 ``[B,Nmax,2]``；``single_drag``、``plant_state`` 和
+        ``plant_mask`` 为 ``[B,Nmax]``。状态张量使用 int64，真实水草为 1/2，
+        padding 为 0；其他浮点特征和可追踪元数据均按批次堆叠。
     """
     if not samples:
         raise ValueError("不能对空样本列表执行 collate。")
@@ -151,22 +172,29 @@ def collate_hydro_samples(samples: Sequence[dict[str, Any]]) -> dict[str, Tensor
 
     positions = torch.zeros((batch_size, maximum_plant_count, 2), dtype=dtype, device=device)
     single_drag = torch.zeros((batch_size, maximum_plant_count), dtype=dtype, device=device)
+    # 状态 0 专门表示 padding；真实水草只能使用状态 1 或 2。
+    plant_state = torch.zeros(
+        (batch_size, maximum_plant_count), dtype=torch.long, device=device
+    )
     plant_mask = torch.zeros((batch_size, maximum_plant_count), dtype=torch.bool, device=device)
 
     for batch_index, sample in enumerate(samples):
         plant_count = int(sample["positions"].shape[0])
         positions[batch_index, :plant_count] = sample["positions"]
         single_drag[batch_index, :plant_count] = sample["single_drag"]
+        plant_state[batch_index, :plant_count] = sample["plant_state"]
         plant_mask[batch_index, :plant_count] = sample["plant_mask"]
 
     return {
         "positions": positions,
         "single_drag": single_drag,
+        "plant_state": plant_state,
         "plant_mask": plant_mask,
         "global_features": torch.stack([sample["global_features"] for sample in samples]),
         "target_drag": torch.stack([sample["target_drag"] for sample in samples]),
         "raw_target_drag": torch.stack([sample["raw_target_drag"] for sample in samples]),
         "model_id": torch.tensor([sample["model_id"] for sample in samples], dtype=torch.long),
+        "state_id": torch.tensor([sample["state_id"] for sample in samples], dtype=torch.long),
         "angle": torch.tensor([sample["angle"] for sample in samples], dtype=torch.long),
         "flow_speed": torch.tensor([sample["flow_speed"] for sample in samples], dtype=dtype),
         "source_index": torch.tensor([sample["source_index"] for sample in samples], dtype=torch.long),

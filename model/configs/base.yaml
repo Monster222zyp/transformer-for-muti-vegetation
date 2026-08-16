@@ -6,11 +6,15 @@ data:
   csv_path: model/data/all_models.csv
   # 用于把 vegetation_layout 反查为 model_id 和 angle。
   input_csv_path: Experiment/input.csv
+  # 两种水草状态的角度分组和“状态 × 流速”单株实测阻力。
+  physics_config_path: model/configs/physical.yaml
   # 当前把小量负阻力视为待验证的测量偏差并在训练时归零；噪声解释仍需传感器不确定度验证，原值继续写入预测表。
   negative_target_policy: clamp_to_zero
 
 model:
   global_input_dim: 1
+  # 状态 1/2 分别使用一个可学习的初始 Token；该值按实验协议固定为 2。
+  num_plant_states: 2
   d_model: 256
   n_heads: 8
   n_layers: 4
@@ -24,16 +28,28 @@ model:
   condition_relative_value_on_global: true
 
 training:
+  # 训练目标：((预测总阻力-真实总阻力)/max(|真实值|, 分母下限))^2 的 batch 平均值。
+  loss: stabilized_relative_mse
+  # 分母下限只使用当前 fold 的训练集正标签拟合，不能读取 validation/test。
+  relative_loss_floor_strategy: train_positive_quantile
+  # 取训练集正标签的 5% 分位数；零标签继续参与 loss，并使用该下限作分母。
+  relative_loss_floor_quantile: 0.05
   batch_size: 32
   learning_rate: 0.0003
   weight_decay: 0.0001
   max_epochs: 500
-  early_stopping_patience: 50
+  early_stopping_patience: 100
   gradient_clip: 1.0
   # Windows 环境默认使用主进程加载，减少多进程启动问题。
   num_workers: 0
   # auto 会优先使用 CUDA；没有可用显卡时自动使用 CPU。
   device: auto
+  # 每训练 10 个 epoch 向 terminal 输出一次训练集和验证集 loss。
+  progress_interval_epochs: 10
+  # loss_curve.png 每 10 个 epoch 取一个常规采样点。
+  loss_plot_interval_epochs: 10
+  # 完整 last.pt 每 100 个 epoch 保存一次；最终 epoch 和 early stopping 时仍会强制保存。
+  checkpoint_interval_epochs: 100
 
 cross_validation:
   n_splits: 5

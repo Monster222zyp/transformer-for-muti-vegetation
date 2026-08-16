@@ -18,11 +18,18 @@ import numpy as np
 import torch
 
 from model.hydro.data import HydroDataset, collate_hydro_samples
+from model.hydro.physics import load_physical_config
 from model.models import HydroTransformer
 from model.training.config import load_config, save_config_snapshot
+from model.training.losses import (
+    DEFAULT_RELATIVE_FLOOR_QUANTILE,
+    RELATIVE_FLOOR_STRATEGY,
+    fit_relative_drag_floor,
+)
 from model.training.metrics import compute_regression_metrics
 from model.training.splits import GroupSplit, build_group_kfold_splits
 from model.training.trainer import (
+    LOSS_NAME,
     GlobalFeatureScaler,
     fit_fixed_epochs,
     fit_with_early_stopping,
@@ -50,6 +57,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="YAML 配置。")
     parser.add_argument("--data", help="覆盖配置中的总 CSV 路径。")
     parser.add_argument("--input-csv", help="覆盖 Experiment/input.csv 路径。")
+    parser.add_argument("--physics-config", help="覆盖双状态物理参数 YAML 路径。")
     parser.add_argument("--artifact-dir", help="覆盖产物目录。")
     parser.add_argument("--device", help="auto、cpu 或 cuda。")
     parser.add_argument("--batch-size", type=int, help="覆盖 batch size。")
@@ -69,6 +77,10 @@ def _apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> No
         config["data"]["csv_path"] = str(Path(args.data).resolve())
     if args.input_csv:
         config["data"]["input_csv_path"] = str(Path(args.input_csv).resolve())
+    if args.physics_config:
+        config["data"]["physics_config_path"] = str(
+            Path(args.physics_config).resolve()
+        )
     if args.artifact_dir:
         config["output"]["artifact_dir"] = str(Path(args.artifact_dir).resolve())
     if args.device:
@@ -91,6 +103,7 @@ def _resolve_config_paths(config: dict[str, Any]) -> None:
     for section, key in (
         ("data", "csv_path"),
         ("data", "input_csv_path"),
+        ("data", "physics_config_path"),
         ("output", "artifact_dir"),
     ):
         configured_path = Path(config[section][key])
@@ -138,6 +151,7 @@ def _write_fold_manifest(
                         "dataset_index": int(index),
                         "source_index": int(sample["source_index"]),
                         "model_id": int(sample["model_id"]),
+                        "state_id": int(sample["state_id"]),
                         "angle": int(sample["angle"]),
                         "flow_speed": float(sample["flow_speed"]),
                     }
@@ -156,9 +170,42 @@ def _new_model(model_config: dict[str, Any], seed: int) -> HydroTransformer:
     return HydroTransformer(**model_config)
 
 
+def _fit_training_relative_floor(
+    dataset: HydroDataset,
+    train_indices: np.ndarray,
+    settings: dict[str, Any],
+) -> float:
+    """仅使用当前训练索引拟合稳定化相对 loss 的分母下限。
+
+    参数：
+        dataset: 包含 ``target_drag`` 的完整数据集。
+        train_indices: 当前 overfit、fold 或 final 的训练样本索引。
+        settings: 训练配置，提供分母策略与正标签分位数。
+
+    返回值：
+        当前训练任务固定使用的有限正分母下限。
+    """
+
+    strategy = str(
+        settings.get("relative_loss_floor_strategy", RELATIVE_FLOOR_STRATEGY)
+    )
+    if strategy != RELATIVE_FLOOR_STRATEGY:
+        raise ValueError(
+            "当前只支持 relative_loss_floor_strategy="
+            f"{RELATIVE_FLOOR_STRATEGY!r}，实际收到 {strategy!r}。"
+        )
+    quantile = float(
+        settings.get(
+            "relative_loss_floor_quantile", DEFAULT_RELATIVE_FLOOR_QUANTILE
+        )
+    )
+    return fit_relative_drag_floor(dataset, train_indices, quantile=quantile)
+
+
 def _checkpoint_metadata(
     config: dict[str, Any],
     checkpoint_role: str,
+    relative_floor: float,
     evaluation_source_indices: list[int] | None = None,
 ) -> dict[str, Any]:
     """构造评估恢复所需的数据来源、标签策略和 held-out 索引。"""
@@ -168,6 +215,20 @@ def _checkpoint_metadata(
         "dataset_path": config["data"]["csv_path"],
         "input_csv_path": config["data"]["input_csv_path"],
         "negative_target_policy": config["data"]["negative_target_policy"],
+        # 保存训练目标的完整语义；评估可以忽略，断点续训必须严格核对。
+        "loss_name": LOSS_NAME,
+        "relative_floor": float(relative_floor),
+        "relative_floor_strategy": config["training"].get(
+            "relative_loss_floor_strategy", RELATIVE_FLOOR_STRATEGY
+        ),
+        "relative_floor_quantile": float(
+            config["training"].get(
+                "relative_loss_floor_quantile",
+                DEFAULT_RELATIVE_FLOOR_QUANTILE,
+            )
+        ),
+        # 保存完整解析结果而不只保存文件路径，避免物理 YAML 后续修改影响历史模型。
+        "physical_config": config["resolved_physical_config"],
         "evaluation_source_indices": evaluation_source_indices,
     }
 
@@ -185,8 +246,15 @@ def run_overfit(
     settings = dict(config["training"])
     # overfit 是诊断，不应因 patience 提前中断；允许用户用 max_epochs 控制耗时。
     settings["early_stopping_patience"] = int(settings["max_epochs"]) + 1
+    relative_floor = _fit_training_relative_floor(dataset, indices, settings)
     overfit_seed = int(config["seed"])
     model = _new_model(config["model"], overfit_seed)
+    print(
+        f"开始 Overfit 训练：samples={indices.size}, "
+        f"max_epochs={int(settings['max_epochs'])}, "
+        f"relative_floor={relative_floor:.6g}",
+        flush=True,
+    )
     source_indices = [
         int(dataset[int(index)]["source_index"]) for index in indices
     ]
@@ -201,10 +269,12 @@ def run_overfit(
         artifact_dir=output_dir / "overfit",
         model_config=config["model"],
         seed=overfit_seed,
+        relative_floor=relative_floor,
         resume_from=resume,
         checkpoint_metadata=_checkpoint_metadata(
-            config, "overfit", source_indices
+            config, "overfit", relative_floor, source_indices
         ),
+        progress_label="Overfit",
     )
     prediction = predict_dataset(
         model,
@@ -219,7 +289,7 @@ def run_overfit(
     write_prediction_result(prediction, output_dir / "overfit", "overfit")
     print(
         f"Overfit 完成：best_epoch={result.best_epoch}, "
-        f"C-MSE={result.best_validation_loss:.6g}"
+        f"Relative-MSE={result.best_validation_loss:.6g}"
     )
 
 
@@ -245,11 +315,22 @@ def run_cross_validation(
     for split in splits:
         fold_dir = output_dir / f"fold_{split.fold}"
         scaler = GlobalFeatureScaler.fit(dataset, split.train_indices)
+        relative_floor = _fit_training_relative_floor(
+            dataset, split.train_indices, config["training"]
+        )
         fold_dir.mkdir(parents=True, exist_ok=True)
         _write_scaler(fold_dir / "scaler.json", scaler)
 
         fold_seed = int(config["seed"]) + split.fold
         model = _new_model(config["model"], fold_seed)
+        print(
+            f"开始 Fold {split.fold}：train={split.train_indices.size}, "
+            f"validation={split.validation_indices.size}, "
+            f"test={split.test_indices.size}, "
+            f"max_epochs={int(config['training']['max_epochs'])}, "
+            f"relative_floor={relative_floor:.6g}",
+            flush=True,
+        )
         test_source_indices = [
             int(dataset[int(index)]["source_index"])
             for index in split.test_indices
@@ -265,9 +346,11 @@ def run_cross_validation(
             artifact_dir=fold_dir,
             model_config=config["model"],
             seed=fold_seed,
+            relative_floor=relative_floor,
             checkpoint_metadata=_checkpoint_metadata(
-                config, "fold", test_source_indices
+                config, "fold", relative_floor, test_source_indices
             ),
+            progress_label=f"Fold {split.fold}",
         )
         test_result = predict_dataset(
             model,
@@ -290,7 +373,8 @@ def run_cross_validation(
             {
                 "fold": split.fold,
                 "best_epoch": fit_result.best_epoch,
-                "best_validation_C_MSE": fit_result.best_validation_loss,
+                "best_validation_relative_MSE": fit_result.best_validation_loss,
+                "relative_floor": relative_floor,
                 **test_result.metrics,
             }
         )
@@ -320,9 +404,17 @@ def run_cross_validation(
     final_epochs = int(np.floor(statistics.median(best_epochs) + 0.5))
     all_indices = np.arange(len(dataset), dtype=np.int64)
     full_scaler = GlobalFeatureScaler.fit(dataset, all_indices)
+    final_relative_floor = _fit_training_relative_floor(
+        dataset, all_indices, config["training"]
+    )
     _write_scaler(output_dir / "final_scaler.json", full_scaler)
     final_seed = int(config["seed"])
     final_model = _new_model(config["model"], final_seed)
+    print(
+        f"开始全量重训：samples={all_indices.size}, epochs={final_epochs}, "
+        f"relative_floor={final_relative_floor:.6g}",
+        flush=True,
+    )
     final_checkpoint = fit_fixed_epochs(
         final_model,
         dataset,
@@ -334,7 +426,11 @@ def run_cross_validation(
         config["model"],
         int(config["seed"]),
         final_epochs,
-        checkpoint_metadata=_checkpoint_metadata(config, "final"),
+        final_relative_floor,
+        checkpoint_metadata=_checkpoint_metadata(
+            config, "final", final_relative_floor
+        ),
+        progress_label="Final retraining",
     )
     print(f"交叉验证及全量重训完成：{final_checkpoint}")
 
@@ -350,7 +446,7 @@ def _write_rows(path: Path, rows: list[dict[str, Any]]) -> None:
 
 def main() -> None:
     """加载配置和数据，派发 overfit 或 CV 流程。"""
-
+    print("CUDA available:", torch.cuda.is_available())
     args = parse_args()
     if args.mode == "cv" and args.resume_checkpoint:
         raise ValueError("--resume-checkpoint 目前仅用于 overfit 模式。")
@@ -359,11 +455,14 @@ def main() -> None:
     _apply_cli_overrides(config, args)
     output_dir = Path(config["output"]["artifact_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
+    physical_config = load_physical_config(config["data"]["physics_config_path"])
+    config["resolved_physical_config"] = physical_config.to_dict()
     save_config_snapshot(config, output_dir / "resolved_config.json")
     dataset = HydroDataset(
         config["data"]["csv_path"],
         input_csv_path=config["data"]["input_csv_path"],
         negative_target_policy=config["data"]["negative_target_policy"],
+        physical_config=physical_config,
     )
     if args.mode == "overfit":
         run_overfit(dataset, config, output_dir, args.resume_checkpoint)

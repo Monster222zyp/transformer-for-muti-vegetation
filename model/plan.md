@@ -176,34 +176,35 @@ r=\log Re
 
 ---
 
-# 四、Plant token 的第一版设计
+# 四、Plant token 的双状态设计
 
-如果所有水草本身完全一样，我依然建议：
+当前实验已经确认水草有两种初始朝向状态：状态 1 对应
+`0/120/240°`，状态 2 对应 `60/180/300°`。因此初始表示改为：
 
 [
 \boxed{
-h_i^{(0)}=e_{\rm plant}
+h_i^{(0)}=e_{s_i},\quad s_i\in\{1,2\}
 }
 ]
 
 其中：
 
 [
-e_{\rm plant}\in\mathbb R^{d_{\rm model}}
+e_1,e_2\in\mathbb R^{d_{\rm model}}
 ]
 
-是一个 learnable parameter。
+是两个相互独立的 learnable parameter。状态 0 只表示 padding，并固定为零。
 
 例如：
 
 ```python
-self.plant_token = nn.Parameter(torch.randn(d_model))
+self.plant_tokens = nn.Embedding(3, d_model, padding_idx=0)
 ```
 
 forward：
 
 ```python
-H = self.plant_token[None, None, :].expand(B, N, -1)
+H = self.plant_tokens(plant_state)
 ```
 
 ---

@@ -34,10 +34,14 @@ def _make_batch(batch_size: int = 2, plant_count: int = 4):
     single_drag = torch.rand(batch_size, plant_count) + 0.2
     global_features = torch.rand(batch_size, 1)
     plant_mask = torch.ones(batch_size, plant_count, dtype=torch.bool)
+    plant_state = torch.ones(batch_size, plant_count, dtype=torch.long)
+    if batch_size > 1:
+        plant_state[1] = 2
     if batch_size > 1:
         plant_mask[1, -1] = False
         single_drag[1, -1] = 0.0
-    return positions, single_drag, global_features, plant_mask
+        plant_state[1, -1] = 0
+    return positions, single_drag, global_features, plant_mask, plant_state
 
 
 def _make_coefficients_nontrivial(model: HydroTransformer) -> None:
@@ -72,8 +76,8 @@ def test_rope_dimension_constraint_only_applies_when_enabled():
         ffn_dim=36,
         use_rope=False,
     ).eval()
-    positions, single_drag, global_features, plant_mask = _make_batch(batch_size=1)
-    outputs = model(positions, single_drag, global_features, plant_mask)
+    positions, single_drag, global_features, plant_mask, plant_state = _make_batch(batch_size=1)
+    outputs = model(positions, single_drag, global_features, plant_mask, plant_state)
     assert torch.isfinite(outputs["total_drag"]).all()
 
     # 同一维度组合一旦启用 RoPE，就应尽早给出清晰的配置错误。
@@ -158,8 +162,8 @@ def test_permutation_equivariance_and_total_drag_invariance():
 
     model = _small_model().eval()
     _make_coefficients_nontrivial(model)
-    positions, single_drag, global_features, plant_mask = _make_batch(batch_size=1)
-    original = model(positions, single_drag, global_features, plant_mask)
+    positions, single_drag, global_features, plant_mask, plant_state = _make_batch(batch_size=1)
+    original = model(positions, single_drag, global_features, plant_mask, plant_state)
 
     permutation = torch.tensor([2, 0, 3, 1])
     permuted = model(
@@ -167,6 +171,7 @@ def test_permutation_equivariance_and_total_drag_invariance():
         single_drag[:, permutation],
         global_features,
         plant_mask[:, permutation],
+        plant_state[:, permutation],
     )
 
     torch.testing.assert_close(permuted["total_drag"], original["total_drag"], atol=1e-5, rtol=1e-5)
@@ -180,13 +185,14 @@ def test_padding_invariance():
 
     model = _small_model().eval()
     _make_coefficients_nontrivial(model)
-    positions, single_drag, global_features, plant_mask = _make_batch(batch_size=1, plant_count=3)
-    original = model(positions, single_drag, global_features, plant_mask)
+    positions, single_drag, global_features, plant_mask, plant_state = _make_batch(batch_size=1, plant_count=3)
+    original = model(positions, single_drag, global_features, plant_mask, plant_state)
 
     padded_positions = torch.cat((positions, torch.randn(1, 5, 2)), dim=1)
     padded_drag = torch.cat((single_drag, torch.zeros(1, 5)), dim=1)
     padded_mask = torch.cat((plant_mask, torch.zeros(1, 5, dtype=torch.bool)), dim=1)
-    padded = model(padded_positions, padded_drag, global_features, padded_mask)
+    padded_state = torch.cat((plant_state, torch.zeros(1, 5, dtype=torch.long)), dim=1)
+    padded = model(padded_positions, padded_drag, global_features, padded_mask, padded_state)
 
     torch.testing.assert_close(padded["total_drag"], original["total_drag"], atol=1e-5, rtol=1e-5)
     torch.testing.assert_close(
@@ -204,6 +210,7 @@ def test_single_plant_physics_informed_initialization():
         single_drag=torch.tensor([[2.75]]),
         global_features=torch.tensor([[0.2]]),
         plant_mask=torch.tensor([[True]]),
+        plant_state=torch.tensor([[2]], dtype=torch.long),
     )
 
     torch.testing.assert_close(outputs["coefficient"], torch.ones(1, 1))
@@ -255,6 +262,7 @@ def test_all_padding_is_finite_and_returns_zero():
         single_drag=torch.zeros(2, 4),
         global_features=torch.randn(2, 1),
         plant_mask=torch.zeros(2, 4, dtype=torch.bool),
+        plant_state=torch.zeros(2, 4, dtype=torch.long),
         return_attention=True,
     )
 
@@ -270,8 +278,8 @@ def test_forward_backward_has_no_nan():
     """完整前向和反向传播中的输出、损失、梯度均应为有限数。"""
 
     model = _small_model().train()
-    positions, single_drag, global_features, plant_mask = _make_batch()
-    outputs = model(positions, single_drag, global_features, plant_mask)
+    positions, single_drag, global_features, plant_mask, plant_state = _make_batch()
+    outputs = model(positions, single_drag, global_features, plant_mask, plant_state)
     target = torch.tensor([2.0, 1.5])
     loss = torch.nn.functional.mse_loss(outputs["total_drag"], target)
     loss.backward()
@@ -281,3 +289,58 @@ def test_forward_backward_has_no_nan():
     gradients = [parameter.grad for parameter in model.parameters() if parameter.grad is not None]
     assert gradients
     assert all(torch.isfinite(gradient).all() for gradient in gradients)
+
+
+def test_two_states_use_independent_trainable_tokens():
+    """相同几何切换状态后应选择不同 Token，且两个 Token 都能获得梯度。"""
+
+    model = _small_model().train()
+    _make_coefficients_nontrivial(model)
+    positions = torch.tensor(
+        [
+            [[0.0, 0.0], [1.0, 0.0]],
+            [[0.0, 0.0], [1.0, 0.0]],
+        ]
+    )
+    single_drag = torch.ones(2, 2)
+    global_features = torch.zeros(2, 1)
+    plant_mask = torch.ones(2, 2, dtype=torch.bool)
+    plant_state = torch.tensor([[1, 1], [2, 2]], dtype=torch.long)
+
+    assert not torch.equal(model.plant_tokens.weight[1], model.plant_tokens.weight[2])
+    outputs = model(
+        positions, single_drag, global_features, plant_mask, plant_state
+    )
+    assert not torch.allclose(outputs["total_drag"][0], outputs["total_drag"][1])
+    outputs["total_drag"].sum().backward()
+    assert model.plant_tokens.weight.grad is not None
+    assert torch.count_nonzero(model.plant_tokens.weight.grad[1]) > 0
+    assert torch.count_nonzero(model.plant_tokens.weight.grad[2]) > 0
+    assert torch.count_nonzero(model.plant_tokens.weight.grad[0]) == 0
+
+
+def test_invalid_state_or_padding_state_is_rejected():
+    """有效植株只能使用状态 1/2，padding 则必须使用状态 0。"""
+
+    model = _small_model().eval()
+    positions = torch.zeros(1, 2, 2)
+    single_drag = torch.tensor([[1.0, 0.0]])
+    global_features = torch.zeros(1, 1)
+    plant_mask = torch.tensor([[True, False]])
+
+    for invalid_state in (
+        torch.tensor([[3, 0]], dtype=torch.long),
+        torch.tensor([[1, 2]], dtype=torch.long),
+    ):
+        try:
+            model(
+                positions,
+                single_drag,
+                global_features,
+                plant_mask,
+                invalid_state,
+            )
+        except ValueError as error:
+            assert "plant_state" in str(error)
+        else:
+            raise AssertionError("非法 plant_state 应被拒绝。")

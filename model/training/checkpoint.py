@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import sys
+import time
+import uuid
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -9,7 +13,11 @@ from typing import Any
 import torch
 
 
-CHECKPOINT_VERSION = 2
+# version 4 引入双状态 Token 和可复现的物理单株阻力表。旧单 Token checkpoint
+# 不具备新的输入语义，因此不执行不可靠的自动迁移。
+CHECKPOINT_VERSION = 4
+# 首次替换失败后依次等待这些秒数；因此总共最多尝试 5 次原子替换。
+CHECKPOINT_RETRY_DELAYS_SECONDS = (0.2, 0.5, 1.0, 2.0)
 
 
 def resolved_model_config(model: torch.nn.Module) -> dict[str, Any] | None:
@@ -38,6 +46,10 @@ def _validate_model_config(
     actual = resolved_model_config(model)
     if actual is None:
         return
+    if int(checkpoint.get("checkpoint_version", -1)) < CHECKPOINT_VERSION:
+        raise ValueError(
+            "checkpoint 来自旧版单 Token 架构，缺少双状态语义；请重新训练模型。"
+        )
     expected = checkpoint.get("model_config")
     if expected is None:
         raise ValueError("checkpoint 缺少完整 model_config，无法安全恢复 HydroTransformer。")
@@ -54,7 +66,7 @@ def _validate_model_config(
 
 
 def save_checkpoint(path: str | Path, state: dict[str, Any]) -> None:
-    """原子保存 checkpoint，避免训练中断留下半个文件。
+    """原子保存 checkpoint，并容忍 Windows 上短暂的文件占用。
 
     Args:
         path: 最终 checkpoint 路径。
@@ -63,9 +75,39 @@ def save_checkpoint(path: str | Path, state: dict[str, Any]) -> None:
 
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    # PID 区分不同训练进程，UUID 区分同一进程的多次保存。即使上次失败留下
+    # 临时文件，下一次保存也不会覆盖那份可恢复的完整 checkpoint。
+    temporary = destination.with_name(
+        f"{destination.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    )
     torch.save(state, temporary)
-    temporary.replace(destination)
+
+    # torch.save 已经完整结束后才进入替换阶段。Windows Defender、索引服务或其他
+    # 读取进程可能短暂锁定 destination，因此仅对 PermissionError 做有限重试。
+    maximum_attempts = len(CHECKPOINT_RETRY_DELAYS_SECONDS) + 1
+    for attempt_index in range(maximum_attempts):
+        try:
+            temporary.replace(destination)
+            return
+        except PermissionError as error:
+            if attempt_index == maximum_attempts - 1:
+                message = (
+                    f"checkpoint 已完整写入临时文件，但连续 {maximum_attempts} 次无法替换"
+                    f"目标文件 {destination}。临时文件已保留在 {temporary}，请勿删除；"
+                    "请检查杀毒软件、同步程序、文件预览器或其他训练进程是否占用目标文件。"
+                )
+                print(message, file=sys.stderr, flush=True)
+                raise PermissionError(message) from error
+
+            delay = CHECKPOINT_RETRY_DELAYS_SECONDS[attempt_index]
+            print(
+                f"checkpoint 目标文件暂时被占用：{destination}；"
+                f"将在 {delay:g} 秒后重试原子替换 "
+                f"({attempt_index + 2}/{maximum_attempts})。",
+                file=sys.stderr,
+                flush=True,
+            )
+            time.sleep(delay)
 
 
 def load_checkpoint(

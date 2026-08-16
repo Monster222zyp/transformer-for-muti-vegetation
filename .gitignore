@@ -13,5 +13,6 @@ rotated_plots_sorted/
 rotatedplots*/**/*.csv
 rotated_plots*/**/*.csv
 
+artifacts/
 
 input.csv
