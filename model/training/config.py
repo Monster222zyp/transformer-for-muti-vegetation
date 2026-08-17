@@ -53,6 +53,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "checkpoint_interval_epochs": 100,
     },
     "cross_validation": {
+        # 默认保持同一 model_id 完整，避免相近角度和流速跨集合造成数据泄漏。
+        "split_mode": "model",
         "n_splits": 5,
         "validation_fraction": 0.2,
     },

@@ -71,7 +71,13 @@ checkpoint 保存的完整模型配置与当前模型，避免把权重误载入
 py -3.11 -m model.train --mode cv
 ```
 
-交叉验证的 group 固定为 `model_id`：同一基础排列的六个角度和所有流速只能出现在 train、validation、test 中的一个集合，避免数据泄漏。每个外层训练集合再按固定 seed 抽取20%的 model groups 作为 validation。每折的 early stopping 最优 epoch 完成后，以五折最优 epoch 的中位数在全部数据上重训 `final_model.pt`。
+交叉验证只通过配置文件中的 `cross_validation.split_mode` 选择划分粒度：
+
+- `sample`：逐条样本随机分配，适合衡量对同分布工况的插值能力；
+- `model`：同一 `model_id` 的六个角度和所有流速只能完整进入 train、validation、test 中的一个集合，默认使用此模式；
+- `plant_count`：水草根数相同的全部样本只能完整进入一个集合，用于验证模型对未见水草根数的泛化能力。
+
+三种模式都由 `seed` 控制并尽量平衡各折样本数。每折的 early stopping 最优 epoch 完成后，以五折最优 epoch 的中位数在全部数据上重训 `final_model.pt`。
 
 常用覆盖参数：
 
@@ -79,8 +85,19 @@ py -3.11 -m model.train --mode cv
 py -3.11 -m model.train --mode cv `
   --data model/data/all_models.csv `
   --artifact-dir model/artifacts/run_001 `
-  --device auto --batch-size 32 --max-epochs 500 --seed 20260814
+  --device auto --batch-size 32 --max-epochs 500 --seed 20260816
 ```
+
+例如需要验证模型对未见水草根数的泛化能力时，先修改 YAML：
+
+```yaml
+cross_validation:
+  split_mode: plant_count
+  n_splits: 5
+  validation_fraction: 0.2
+```
+
+然后正常运行 `python -m model.train --mode cv`。`split_mode` 不提供命令行覆盖，避免正式实验时命令行与配置文件记录不一致。
 
 更完整的默认值位于 `model/configs/base.yaml`。CLI 参数优先于 YAML。优化器为 AdamW：CUDA 训练启用 fused 实现，CPU 自动回退普通实现。训练使用稳定化目标相对 MSE：
 
@@ -90,7 +107,7 @@ mean(((predicted_drag - target_drag) / max(abs(target_drag), relative_floor))^2)
 
 `relative_floor` 是当前训练子集中所有正 `target_drag` 的 5% 分位数。每个 fold 只使用自己的 train 索引拟合一次，validation 和 test 直接复用，不能参与统计；Overfit 使用前 32 条训练样本拟合，final 重训使用全部训练数据拟合。这样小阻力样本按相对偏差参与优化，同时避免 4 个零标签发生除零。若训练子集没有正标签，训练会直接报错。学习率先线性 warmup，再 cosine 衰减，同时执行梯度范数裁剪。`C` 仍作为评估指标输出，但不参与训练 loss。
 
-训练开始时会先打印当前 overfit/fold 的样本数和实际 `relative_floor`。之后每 10 个 epoch 在 terminal 输出一次：当前 epoch、`train_relative_mse`、`validation_relative_mse` 和学习率。若 early stopping 发生在非 10 倍数位置，还会额外打印停止时的 loss。间隔可通过 `training.progress_interval_epochs` 调整。
+训练开始时会先打印当前 overfit/fold 的样本数和实际 `relative_floor`。之后按 `training.progress_interval_epochs` 在 terminal 输出当前 epoch、`train_relative_mse`、`validation_relative_mse` 和学习率；当前 `base.yaml` 设置为每 1 个 epoch 输出一次。若 early stopping 发生在非固定间隔位置，还会额外打印停止时的 loss。
 
 ## 5. 独立评估
 
@@ -132,11 +149,13 @@ MAPE（平均绝对百分比误差）不能除以零，所以只统计 `target_d
 
 ## 6. 训练产物与测试
 
-`model/artifacts/` 默认被 Git 忽略。主要产物有配置快照、fold 分配表、scaler、`best.pt`、`last.pt`、最终 checkpoint、`history.json`、`history.csv`、逐样本预测、逐株系数和指标汇总。`history.csv` 的列为 `epoch`、`train_relative_mse`、`validation_relative_mse` 和 `learning_rate`。`best.pt` 是轻量评估 checkpoint，只含模型权重、scaler、配置、最佳 epoch/loss 和评估范围信息；`last.pt` 才含 optimizer、scheduler 和 history，用于断点续训。所有 checkpoint 都记录实际使用的相对分母。默认每 100 个 epoch 更新 `last.pt`，最终 epoch 与 early stopping 时强制保存。
+`model/artifacts/` 默认被 Git 忽略。主要产物有配置快照、带 `plant_count` 和 `split_mode` 的 fold 分配表、scaler、`best.pt`、`last.pt`、最终 checkpoint、`history.json`、`history.csv`、逐样本预测、逐株系数和指标汇总。`history.csv` 的列为 `epoch`、`train_relative_mse`、`validation_relative_mse` 和 `learning_rate`。`best.pt` 是轻量评估 checkpoint，只含模型权重、scaler、配置、最佳 epoch/loss 和评估范围信息；`last.pt` 才含 optimizer、scheduler 和 history，用于断点续训。所有 checkpoint 都记录实际使用的相对分母与划分模式。默认每 100 个 epoch 更新 `last.pt`，最终 epoch 与 early stopping 时强制保存。
 
 checkpoint 先写入带进程 PID 和随机标识的唯一临时文件，再原子替换正式文件。Windows 短暂锁定目标文件时会按 0.2、0.5、1、2 秒自动重试；全部失败时，终端会显示完整临时文件路径，并保留该可恢复文件，不会删除或覆盖它。
 
-每个 `fold_N/` 和 `overfit/` 目录还会生成 `loss_curve.png`：横轴是 epoch，纵轴是稳定化相对 MSE loss，两条折线分别表示训练集和验证集。常规采样点间隔为 10 个 epoch；若训练在非 10 倍数处提前停止，图中会额外保留最后一个 epoch。采样间隔可通过 `training.loss_plot_interval_epochs` 调整。全量 final 重训没有验证集，因此只在 terminal 输出训练 loss，不生成伪造的双折线验证图。
+每个 `fold_N/` 和 `overfit/` 目录还会生成 `loss_curve.png`：横轴是 epoch，纵轴是稳定化相对 MSE loss，两条折线分别表示训练集和验证集。采样间隔由 `training.loss_plot_interval_epochs` 控制，当前 `base.yaml` 设置为每 1 个 epoch 一个点；若训练在非固定间隔位置提前停止，图中会额外保留最后一个 epoch。全量 final 重训没有验证集，因此只在 terminal 输出训练 loss，不生成伪造的双折线验证图。
+
+每个 `fold_N/` 会为 validation 和 test 各写一套结果：`*_metrics.json`、`*_predictions.csv`、`*_plant_coefficients.csv`，并分别生成 `validation_drag_comparison.png` 与 `test_drag_comparison.png`。预测图先按 `isolated_drag` 从小到大排序；相同值再按 `target_drag` 从小到大排序。横轴是排序后的样本序号，三条带点折线分别表示 `target_drag`、`predicted_drag` 和 `isolated_drag`。根目录的 `cv_metrics.json` 与 `cv_predictions.csv` 仍然只聚合 held-out test，不能把用于选 epoch 的 validation 当作独立泛化结果。
 
 运行不含完整训练的快速测试：
 
@@ -144,4 +163,4 @@ checkpoint 先写入带进程 PID 和随机标识的唯一临时文件，再原�
 py -3.11 -m pytest model/tests/test_training_utils.py -q
 ```
 
-该测试检查 group 不泄漏、零标签指标，以及 scheduler/checkpoint 保存恢复。完整模型的几何、mask、permutation 与 forward/backward 测试位于同一测试目录的其他文件中。
+划分与预测图的专项测试分别位于 `test_splits.py` 和 `test_prediction_visualization.py`；它们检查三种模式的可复现性、分组无泄漏、排序规则和 PNG 输出。完整模型的几何、mask、permutation 与 forward/backward 测试位于同一测试目录的其他文件中。

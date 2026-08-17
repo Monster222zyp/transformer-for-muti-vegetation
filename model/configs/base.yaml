@@ -1,5 +1,5 @@
 # 可复现随机种子：控制分组划分、模型初始化和 DataLoader 洗牌。
-seed: 20260814
+seed: 20260816
 
 data:
   # 数据整理脚本生成的八列总 CSV。
@@ -44,16 +44,18 @@ training:
   num_workers: 0
   # auto 会优先使用 CUDA；没有可用显卡时自动使用 CPU。
   device: auto
-  # 每训练 10 个 epoch 向 terminal 输出一次训练集和验证集 loss。
-  progress_interval_epochs: 10
-  # loss_curve.png 每 10 个 epoch 取一个常规采样点。
-  loss_plot_interval_epochs: 10
+  # 每训练 1 个 epoch 向 terminal 输出一次训练集和验证集 loss。
+  progress_interval_epochs: 1
+  # loss_curve.png 每 1 个 epoch 取一个常规采样点。
+  loss_plot_interval_epochs: 1
   # 完整 last.pt 每 100 个 epoch 保存一次；最终 epoch 和 early stopping 时仍会强制保存。
   checkpoint_interval_epochs: 100
 
 cross_validation:
+  # sample：逐样本随机；model：同一构型不可拆分；plant_count：相同水草根数不可拆分。
+  split_mode: plant_count
   n_splits: 5
-  # 每个外层训练集合中，再按 model_id 抽取 20% 作为验证集合。
+  # 每个 outer-train 中再按所选模式抽取约 20% 作为验证集合。
   validation_fraction: 0.2
 
 output:

@@ -27,7 +27,7 @@ from model.training.losses import (
     fit_relative_drag_floor,
 )
 from model.training.metrics import compute_regression_metrics
-from model.training.splits import GroupSplit, build_group_kfold_splits
+from model.training.splits import GroupSplit, build_cross_validation_splits
 from model.training.trainer import (
     LOSS_NAME,
     GlobalFeatureScaler,
@@ -38,6 +38,7 @@ from model.training.trainer import (
     set_reproducible_seed,
     write_prediction_result,
 )
+from model.training.visualization import write_drag_comparison_plot
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -91,8 +92,6 @@ def _apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> No
         config["training"]["max_epochs"] = args.max_epochs
     if args.seed is not None:
         config["seed"] = args.seed
-
-
 def _resolve_config_paths(config: dict[str, Any]) -> None:
     """将 YAML 中的相对默认路径统一解释为相对于项目根目录。
 
@@ -112,12 +111,29 @@ def _resolve_config_paths(config: dict[str, Any]) -> None:
         config[section][key] = str(configured_path.resolve())
 
 
-def _collect_groups(dataset: HydroDataset) -> np.ndarray:
-    """从数据集元数据收集每行 ``model_id``。"""
+def _collect_split_labels(dataset: HydroDataset) -> tuple[np.ndarray, np.ndarray]:
+    """收集三种划分模式需要的 ``model_id`` 和水草根数。
 
-    return np.asarray(
-        [int(dataset[index]["model_id"]) for index in range(len(dataset))],
-        dtype=np.int64,
+    参数：
+        dataset: 完整的 :class:`HydroDataset`。每条样本必须包含 ``model_id`` 和
+            只保留有效植株的 ``positions``。
+
+    返回值：
+        二元组 ``(model_ids, plant_counts)``。两个 NumPy 数组都与数据集等长，
+        第 ``i`` 个元素分别表示第 ``i`` 条样本的构型编号与有效水草根数。
+    """
+
+    model_ids: list[int] = []
+    plant_counts: list[int] = []
+    for index in range(len(dataset)):
+        sample = dataset[index]
+        model_ids.append(int(sample["model_id"]))
+        # Dataset 的 positions 已经移除了 input.csv 中值为 0 的空位，所以第一维
+        # 就是该样本的真实水草根数，不会把 padding 位置误算为水草。
+        plant_counts.append(int(sample["positions"].shape[0]))
+    return (
+        np.asarray(model_ids, dtype=np.int64),
+        np.asarray(plant_counts, dtype=np.int64),
     )
 
 
@@ -131,9 +147,19 @@ def _write_scaler(path: Path, scaler: GlobalFeatureScaler) -> None:
 
 
 def _write_fold_manifest(
-    path: Path, dataset: HydroDataset, splits: list[GroupSplit]
+    path: Path,
+    dataset: HydroDataset,
+    splits: list[GroupSplit],
+    split_mode: str,
 ) -> None:
-    """保存每个 fold 的样本角色，方便检查 model 泄漏。"""
+    """保存每个 fold 的样本角色和分组字段，方便人工检查数据泄漏。
+
+    参数：
+        path: 输出 CSV 路径。
+        dataset: 提供样本元数据的完整数据集。
+        splits: 每折的 train、validation、test 索引。
+        split_mode: 本次使用的 ``sample``、``model`` 或 ``plant_count`` 模式。
+    """
 
     rows: list[dict[str, Any]] = []
     for split in splits:
@@ -151,6 +177,8 @@ def _write_fold_manifest(
                         "dataset_index": int(index),
                         "source_index": int(sample["source_index"]),
                         "model_id": int(sample["model_id"]),
+                        "plant_count": int(sample["positions"].shape[0]),
+                        "split_mode": split_mode,
                         "state_id": int(sample["state_id"]),
                         "angle": int(sample["angle"]),
                         "flow_speed": float(sample["flow_speed"]),
@@ -229,6 +257,9 @@ def _checkpoint_metadata(
         ),
         # 保存完整解析结果而不只保存文件路径，避免物理 YAML 后续修改影响历史模型。
         "physical_config": config["resolved_physical_config"],
+        # 保存划分语义用于科研审计；fold checkpoint 的可评估范围仍只由下方
+        # held-out test source indices 决定，validation 不会混入独立评估。
+        "split_mode": config["cross_validation"].get("split_mode", "model"),
         "evaluation_source_indices": evaluation_source_indices,
     }
 
@@ -296,17 +327,23 @@ def run_overfit(
 def run_cross_validation(
     dataset: HydroDataset, config: dict[str, Any], output_dir: Path
 ) -> None:
-    """执行无 model_id 泄漏的5折评估，随后按中位最佳 epoch 全量重训。"""
+    """按配置执行交叉验证，随后按中位最佳 epoch 在全量数据上重训。"""
 
-    groups = _collect_groups(dataset)
+    model_ids, plant_counts = _collect_split_labels(dataset)
     cv_config = config["cross_validation"]
-    splits = build_group_kfold_splits(
-        groups,
+    split_mode = str(cv_config.get("split_mode", "model"))
+    splits = build_cross_validation_splits(
+        split_mode=split_mode,
+        n_samples=len(dataset),
+        model_ids=model_ids,
+        plant_counts=plant_counts,
         n_splits=int(cv_config["n_splits"]),
         validation_fraction=float(cv_config["validation_fraction"]),
         seed=int(config["seed"]),
     )
-    _write_fold_manifest(output_dir / "fold_assignments.csv", dataset, splits)
+    _write_fold_manifest(
+        output_dir / "fold_assignments.csv", dataset, splits, split_mode
+    )
 
     all_prediction_rows: list[dict[str, Any]] = []
     all_coefficient_rows: list[dict[str, Any]] = []
@@ -324,7 +361,8 @@ def run_cross_validation(
         fold_seed = int(config["seed"]) + split.fold
         model = _new_model(config["model"], fold_seed)
         print(
-            f"开始 Fold {split.fold}：train={split.train_indices.size}, "
+            f"开始 Fold {split.fold}：split_mode={split_mode}, "
+            f"train={split.train_indices.size}, "
             f"validation={split.validation_indices.size}, "
             f"test={split.test_indices.size}, "
             f"max_epochs={int(config['training']['max_epochs'])}, "
@@ -352,6 +390,18 @@ def run_cross_validation(
             ),
             progress_label=f"Fold {split.fold}",
         )
+        # validation 与 test 必须使用完全相同的最优模型、train-only scaler 和
+        # relative_floor 语义。validation 用于选择 epoch，test 仍是 held-out 泛化指标。
+        validation_result = predict_dataset(
+            model,
+            dataset,
+            split.validation_indices,
+            collate_hydro_samples,
+            int(config["training"]["batch_size"]),
+            int(config["training"]["num_workers"]),
+            scaler,
+            resolve_device(str(config["training"]["device"])),
+        )
         test_result = predict_dataset(
             model,
             dataset,
@@ -362,11 +412,26 @@ def run_cross_validation(
             scaler,
             resolve_device(str(config["training"]["device"])),
         )
+        for row in validation_result.predictions:
+            row["fold"] = split.fold
+        for row in validation_result.plant_coefficients:
+            row["fold"] = split.fold
         for row in test_result.predictions:
             row["fold"] = split.fold
         for row in test_result.plant_coefficients:
             row["fold"] = split.fold
+        write_prediction_result(validation_result, fold_dir, "validation")
         write_prediction_result(test_result, fold_dir, "test")
+        write_drag_comparison_plot(
+            validation_result.predictions,
+            fold_dir / "validation_drag_comparison.png",
+            title=f"Fold {split.fold} validation drag comparison",
+        )
+        write_drag_comparison_plot(
+            test_result.predictions,
+            fold_dir / "test_drag_comparison.png",
+            title=f"Fold {split.fold} test drag comparison",
+        )
         all_prediction_rows.extend(test_result.predictions)
         all_coefficient_rows.extend(test_result.plant_coefficients)
         fold_summaries.append(
@@ -375,12 +440,18 @@ def run_cross_validation(
                 "best_epoch": fit_result.best_epoch,
                 "best_validation_relative_MSE": fit_result.best_validation_loss,
                 "relative_floor": relative_floor,
+                "split_mode": split_mode,
+                # 保留原有顶层 test 指标，兼容已经读取 cv_metrics.json 的分析脚本；
+                # 同时增加两个具名对象，使 validation/test 的含义更直观。
+                "validation_metrics": validation_result.metrics,
+                "test_metrics": test_result.metrics,
                 **test_result.metrics,
             }
         )
         best_epochs.append(fit_result.best_epoch)
         print(
             f"Fold {split.fold} 完成：best_epoch={fit_result.best_epoch}, "
+            f"validation_RMSE_D={validation_result.metrics['RMSE_D']:.6g}, "
             f"test_RMSE_D={test_result.metrics['RMSE_D']:.6g}"
         )
 
@@ -390,6 +461,7 @@ def run_cross_validation(
         [row["isolated_drag"] for row in all_prediction_rows],
     )
     aggregate_result = {
+        "split_mode": split_mode,
         "aggregate": aggregate_metrics,
         "folds": fold_summaries,
     }

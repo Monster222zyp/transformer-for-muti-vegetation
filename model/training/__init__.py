@@ -8,11 +8,19 @@ from .losses import (
 )
 from .metrics import compute_regression_metrics
 from .scheduler import WarmupCosineScheduler
-from .splits import GroupSplit, build_group_kfold_splits
+from .splits import (
+    SUPPORTED_SPLIT_MODES,
+    GroupSplit,
+    build_cross_validation_splits,
+    build_group_kfold_splits,
+)
+from .visualization import sort_drag_predictions, write_drag_comparison_plot
 
 __all__ = [
     "GroupSplit",
     "WarmupCosineScheduler",
+    "SUPPORTED_SPLIT_MODES",
+    "build_cross_validation_splits",
     "build_group_kfold_splits",
     "compute_regression_metrics",
     "fit_relative_drag_floor",
@@ -21,4 +29,6 @@ __all__ = [
     "load_checkpoint",
     "resolved_model_config",
     "save_checkpoint",
+    "sort_drag_predictions",
+    "write_drag_comparison_plot",
 ]
