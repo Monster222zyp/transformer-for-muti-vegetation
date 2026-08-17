@@ -1,0 +1,1097 @@
+{
+  "source_root": "C:\\Users\\Mayn\\Desktop\\myfiles\\Transformer project\\transformer-for-muti-vegetation\\summarized_data",
+  "input_csv": "C:\\Users\\Mayn\\Desktop\\myfiles\\Transformer project\\transformer-for-muti-vegetation\\Experiment\\input.csv",
+  "output_csv": "C:\\Users\\Mayn\\Desktop\\myfiles\\Transformer project\\transformer-for-muti-vegetation\\model\\data\\all_models.csv",
+  "columns": [
+    "TX",
+    "TY",
+    "TZ",
+    "FX_0",
+    "FY_0",
+    "FZ",
+    "flow_speed",
+    "vegetation_layout"
+  ],
+  "row_count": 332,
+  "source_file_count": 84,
+  "model_ids": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "rows_by_model": {
+    "1": 24,
+    "2": 24,
+    "3": 22,
+    "4": 24,
+    "5": 24,
+    "6": 24,
+    "7": 24,
+    "8": 24,
+    "9": 23,
+    "10": 24,
+    "11": 24,
+    "12": 24,
+    "13": 23,
+    "14": 24
+  },
+  "rows_by_angle": {
+    "0": 56,
+    "60": 55,
+    "120": 56,
+    "180": 56,
+    "240": 53,
+    "300": 56
+  },
+  "rows_by_flow_speed": {
+    "0.1": 83,
+    "0.2": 83,
+    "0.3": 82,
+    "0.4": 84
+  },
+  "missing_conditions": [
+    {
+      "model_id": 3,
+      "angle": 60,
+      "flow_speed": 0.2
+    },
+    {
+      "model_id": 3,
+      "angle": 240,
+      "flow_speed": 0.3
+    },
+    {
+      "model_id": 9,
+      "angle": 240,
+      "flow_speed": 0.1
+    },
+    {
+      "model_id": 13,
+      "angle": 240,
+      "flow_speed": 0.3
+    }
+  ],
+  "source_files": [
+    {
+      "model_id": 1,
+      "angle": 0,
+      "source_file": "model_1/ang0.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 1,
+      "angle": 60,
+      "source_file": "model_1/ang60.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 1,
+      "angle": 120,
+      "source_file": "model_1/ang120.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 1,
+      "angle": 180,
+      "source_file": "model_1/ang180.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 1,
+      "angle": 240,
+      "source_file": "model_1/ang240.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 1,
+      "angle": 300,
+      "source_file": "model_1/ang300.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 2,
+      "angle": 0,
+      "source_file": "model_2/ang0.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 2,
+      "angle": 60,
+      "source_file": "model_2/ang60.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 2,
+      "angle": 120,
+      "source_file": "model_2/ang120.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 2,
+      "angle": 180,
+      "source_file": "model_2/ang180.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 2,
+      "angle": 240,
+      "source_file": "model_2/ang240.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 2,
+      "angle": 300,
+      "source_file": "model_2/ang300.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 3,
+      "angle": 0,
+      "source_file": "model_3/ang0.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 3,
+      "angle": 60,
+      "source_file": "model_3/ang60.csv",
+      "row_count": 3,
+      "flow_speeds": [
+        0.1,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 3,
+      "angle": 120,
+      "source_file": "model_3/ang120.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 3,
+      "angle": 180,
+      "source_file": "model_3/ang180.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 3,
+      "angle": 240,
+      "source_file": "model_3/ang240.csv",
+      "row_count": 3,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.4
+      ]
+    },
+    {
+      "model_id": 3,
+      "angle": 300,
+      "source_file": "model_3/ang300.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 4,
+      "angle": 0,
+      "source_file": "model_4/ang0.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 4,
+      "angle": 60,
+      "source_file": "model_4/ang60.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 4,
+      "angle": 120,
+      "source_file": "model_4/ang120.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 4,
+      "angle": 180,
+      "source_file": "model_4/ang180.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 4,
+      "angle": 240,
+      "source_file": "model_4/ang240.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 4,
+      "angle": 300,
+      "source_file": "model_4/ang300.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 5,
+      "angle": 0,
+      "source_file": "model_5/ang0.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 5,
+      "angle": 60,
+      "source_file": "model_5/ang60.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 5,
+      "angle": 120,
+      "source_file": "model_5/ang120.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 5,
+      "angle": 180,
+      "source_file": "model_5/ang180.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 5,
+      "angle": 240,
+      "source_file": "model_5/ang240.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 5,
+      "angle": 300,
+      "source_file": "model_5/ang300.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 6,
+      "angle": 0,
+      "source_file": "model_6/ang0.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 6,
+      "angle": 60,
+      "source_file": "model_6/ang60.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 6,
+      "angle": 120,
+      "source_file": "model_6/ang120.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 6,
+      "angle": 180,
+      "source_file": "model_6/ang180.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 6,
+      "angle": 240,
+      "source_file": "model_6/ang240.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 6,
+      "angle": 300,
+      "source_file": "model_6/ang300.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 7,
+      "angle": 0,
+      "source_file": "model_7/ang0.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 7,
+      "angle": 60,
+      "source_file": "model_7/ang60.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 7,
+      "angle": 120,
+      "source_file": "model_7/ang120.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 7,
+      "angle": 180,
+      "source_file": "model_7/ang180.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 7,
+      "angle": 240,
+      "source_file": "model_7/ang240.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 7,
+      "angle": 300,
+      "source_file": "model_7/ang300.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 8,
+      "angle": 0,
+      "source_file": "model_8/ang0.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 8,
+      "angle": 60,
+      "source_file": "model_8/ang60.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 8,
+      "angle": 120,
+      "source_file": "model_8/ang120.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 8,
+      "angle": 180,
+      "source_file": "model_8/ang180.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 8,
+      "angle": 240,
+      "source_file": "model_8/ang240.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 8,
+      "angle": 300,
+      "source_file": "model_8/ang300.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 9,
+      "angle": 0,
+      "source_file": "model_9/ang0.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 9,
+      "angle": 60,
+      "source_file": "model_9/ang60.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 9,
+      "angle": 120,
+      "source_file": "model_9/ang120.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 9,
+      "angle": 180,
+      "source_file": "model_9/ang180.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 9,
+      "angle": 240,
+      "source_file": "model_9/ang240.csv",
+      "row_count": 3,
+      "flow_speeds": [
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 9,
+      "angle": 300,
+      "source_file": "model_9/ang300.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 10,
+      "angle": 0,
+      "source_file": "model_10/ang0.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 10,
+      "angle": 60,
+      "source_file": "model_10/ang60.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 10,
+      "angle": 120,
+      "source_file": "model_10/ang120.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 10,
+      "angle": 180,
+      "source_file": "model_10/ang180.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 10,
+      "angle": 240,
+      "source_file": "model_10/ang240.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 10,
+      "angle": 300,
+      "source_file": "model_10/ang300.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 11,
+      "angle": 0,
+      "source_file": "model_11/ang0.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 11,
+      "angle": 60,
+      "source_file": "model_11/ang60.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 11,
+      "angle": 120,
+      "source_file": "model_11/ang120.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 11,
+      "angle": 180,
+      "source_file": "model_11/ang180.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 11,
+      "angle": 240,
+      "source_file": "model_11/ang240.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 11,
+      "angle": 300,
+      "source_file": "model_11/ang300.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 12,
+      "angle": 0,
+      "source_file": "model_12/ang0.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 12,
+      "angle": 60,
+      "source_file": "model_12/ang60.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 12,
+      "angle": 120,
+      "source_file": "model_12/ang120.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 12,
+      "angle": 180,
+      "source_file": "model_12/ang180.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 12,
+      "angle": 240,
+      "source_file": "model_12/ang240.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 12,
+      "angle": 300,
+      "source_file": "model_12/ang300.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 13,
+      "angle": 0,
+      "source_file": "model_13/ang0.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 13,
+      "angle": 60,
+      "source_file": "model_13/ang60.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 13,
+      "angle": 120,
+      "source_file": "model_13/ang120.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 13,
+      "angle": 180,
+      "source_file": "model_13/ang180.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 13,
+      "angle": 240,
+      "source_file": "model_13/ang240.csv",
+      "row_count": 3,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.4
+      ]
+    },
+    {
+      "model_id": 13,
+      "angle": 300,
+      "source_file": "model_13/ang300.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 14,
+      "angle": 0,
+      "source_file": "model_14/ang0.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 14,
+      "angle": 60,
+      "source_file": "model_14/ang60.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 14,
+      "angle": 120,
+      "source_file": "model_14/ang120.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 14,
+      "angle": 180,
+      "source_file": "model_14/ang180.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 14,
+      "angle": 240,
+      "source_file": "model_14/ang240.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    },
+    {
+      "model_id": 14,
+      "angle": 300,
+      "source_file": "model_14/ang300.csv",
+      "row_count": 4,
+      "flow_speeds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4
+      ]
+    }
+  ],
+  "checks": {
+    "strict_mode": true,
+    "all_rows_have_eight_columns": true,
+    "all_layouts_are_37_bit_binary": true,
+    "rotation_preserves_plant_count": true
+  }
+}

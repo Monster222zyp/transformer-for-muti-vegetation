@@ -1,0 +1,44 @@
+# 可复现随机种子：控制分组划分、模型初始化和 DataLoader 洗牌。
+seed: 20260814
+
+data:
+  # 数据整理脚本生成的八列总 CSV。
+  csv_path: model/data/all_models.csv
+  # 用于把 vegetation_layout 反查为 model_id 和 angle。
+  input_csv_path: Experiment/input.csv
+  # 当前把小量负阻力视为待验证的测量偏差并在训练时归零；噪声解释仍需传感器不确定度验证，原值继续写入预测表。
+  negative_target_policy: clamp_to_zero
+
+model:
+  global_input_dim: 1
+  d_model: 256
+  n_heads: 8
+  n_layers: 4
+  ffn_dim: 1024
+  dropout: 0.05
+  # 下列开关用于后续消融实验（ablation，即逐项关闭模块比较贡献）。
+  use_rope: true
+  use_relative_value: true
+  use_conditional_layernorm: true
+  condition_value_on_global: true
+  condition_relative_value_on_global: true
+
+training:
+  batch_size: 32
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  max_epochs: 500
+  early_stopping_patience: 50
+  gradient_clip: 1.0
+  # Windows 环境默认使用主进程加载，减少多进程启动问题。
+  num_workers: 0
+  # auto 会优先使用 CUDA；没有可用显卡时自动使用 CPU。
+  device: auto
+
+cross_validation:
+  n_splits: 5
+  # 每个外层训练集合中，再按 model_id 抽取 20% 作为验证集合。
+  validation_fraction: 0.2
+
+output:
+  artifact_dir: model/artifacts
