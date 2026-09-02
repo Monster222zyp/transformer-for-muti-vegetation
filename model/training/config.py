@@ -13,8 +13,7 @@ import yaml
 DEFAULT_CONFIG: dict[str, Any] = {
     "seed": 20260814,
     "data": {
-        "csv_path": "model/data/all_models.csv",
-        "input_csv_path": "Experiment/input.csv",
+        "csv_path": "summarized_data.csv",
         "physics_config_path": "model/configs/physical.yaml",
         "negative_target_policy": "clamp_to_zero",
     },

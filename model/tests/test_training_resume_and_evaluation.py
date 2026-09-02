@@ -546,7 +546,7 @@ def test_prediction_keeps_source_index_first_and_rounds_flow_speed() -> None:
 
 
 def test_fold_final_and_external_evaluation_scopes() -> None:
-    """fold 只取 held-out source，final 标记 in-sample，external 使用全部外部行。"""
+    """不同 checkpoint 和重叠标记必须得到准确且不混淆的评估范围。"""
 
     dataset = SourceIndexDataset([10, 20, 30])
     fold_indices, fold_scope = _select_evaluation_indices(
@@ -564,6 +564,15 @@ def test_fold_final_and_external_evaluation_scopes() -> None:
         {"checkpoint_role": "fold", "evaluation_source_indices": [30]},
         external_data=True,
     )
+    overlap_indices, overlap_scope = _select_evaluation_indices(
+        dataset,
+        {
+            "checkpoint_role": "fold",
+            "evaluation_source_indices": [20, 30],
+            "validation_test_overlap": True,
+        },
+        external_data=False,
+    )
 
     assert fold_indices.tolist() == [2, 0]
     assert fold_scope == "held_out"
@@ -571,6 +580,8 @@ def test_fold_final_and_external_evaluation_scopes() -> None:
     assert final_scope == "in_sample"
     assert external_indices.tolist() == [0, 1, 2]
     assert external_scope == "external"
+    assert overlap_indices.tolist() == [1, 2]
+    assert overlap_scope == "validation_test_overlap"
 
 
 def test_relative_config_paths_resolve_from_project_root() -> None:
@@ -578,8 +589,7 @@ def test_relative_config_paths_resolve_from_project_root() -> None:
 
     config = {
         "data": {
-            "csv_path": "model/data/all_models.csv",
-            "input_csv_path": "Experiment/input.csv",
+            "csv_path": "summarized_data.csv",
             "physics_config_path": "model/configs/physical.yaml",
         },
         "output": {"artifact_dir": "model/artifacts"},
@@ -587,6 +597,5 @@ def test_relative_config_paths_resolve_from_project_root() -> None:
     _resolve_config_paths(config)
 
     assert Path(config["data"]["csv_path"]).is_absolute()
-    assert Path(config["data"]["input_csv_path"]).is_absolute()
     assert Path(config["data"]["physics_config_path"]).is_absolute()
     assert Path(config["output"]["artifact_dir"]).is_absolute()

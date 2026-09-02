@@ -1,4 +1,4 @@
-"""三种交叉验证划分模式的专项单元测试。"""
+"""四种训练、验证与测试划分模式的专项单元测试。"""
 
 from __future__ import annotations
 
@@ -132,6 +132,103 @@ def test_plant_count_mode_keeps_equal_counts_in_one_set_per_fold() -> None:
         assert train_groups.isdisjoint(validation_groups)
         assert train_groups.isdisjoint(test_groups)
         assert validation_groups.isdisjoint(test_groups)
+
+
+def test_flow_speed_mode_uses_fixed_train_and_overlapping_holdout() -> None:
+    """flow_speed 应训练前三档，并让完整 0.4 集合同时承担两个评估角色。"""
+
+    flow_speeds = np.asarray(
+        [0.1, 0.4, 0.2, 0.3 + 5.0e-9, 0.4 - 5.0e-9, 0.1],
+        dtype=np.float64,
+    )
+    splits = build_cross_validation_splits(
+        split_mode="flow_speed",
+        n_samples=flow_speeds.size,
+        flow_speeds=flow_speeds,
+        # 下面三个参数在固定流速协议中均不参与结果，故意传入普通模式不允许的值，
+        # 验证它们不会错误阻止 flow_speed 的单折划分。
+        n_splits=1,
+        validation_fraction=2.0,
+        seed=-999,
+    )
+
+    assert len(splits) == 1
+    split = splits[0]
+    assert split.fold == 0
+    assert np.array_equal(split.train_indices, np.asarray([0, 2, 3, 5]))
+    assert np.array_equal(split.validation_indices, np.asarray([1, 4]))
+    assert np.array_equal(split.test_indices, split.validation_indices)
+    assert set(split.train_indices).isdisjoint(split.validation_indices)
+
+
+def test_flow_speed_mode_is_independent_of_cv_parameters() -> None:
+    """固定流速划分不应随折数、验证比例或随机种子变化。"""
+
+    flow_speeds = np.asarray([0.4, 0.3, 0.1, 0.2, 0.4], dtype=np.float64)
+    first = build_cross_validation_splits(
+        split_mode="flow_speed",
+        n_samples=flow_speeds.size,
+        flow_speeds=flow_speeds,
+        n_splits=2,
+        validation_fraction=0.1,
+        seed=1,
+    )
+    second = build_cross_validation_splits(
+        split_mode="flow_speed",
+        n_samples=flow_speeds.size,
+        flow_speeds=flow_speeds,
+        n_splits=99,
+        validation_fraction=0.9,
+        seed=999,
+    )
+
+    _assert_same_splits(first, second)
+
+
+@pytest.mark.parametrize(
+    ("flow_speeds", "n_samples", "error_message"),
+    [
+        (None, 4, "必须提供 flow_speeds"),
+        ([0.1, 0.2, 0.3, 0.4], 5, "长度必须等于 n_samples"),
+        ([0.1, 0.2, 0.3, 0.4, 0.5], 5, "只支持 0.1、0.2、0.3、0.4"),
+        ([0.1, 0.2, 0.3, 0.4, np.nan], 5, "NaN 或无穷大"),
+        ([0.1, 0.2, 0.3, 0.4, np.inf], 5, "NaN 或无穷大"),
+    ],
+)
+def test_flow_speed_mode_rejects_invalid_labels(
+    flow_speeds: list[float] | None,
+    n_samples: int,
+    error_message: str,
+) -> None:
+    """缺失、错长、非有限或协议外的流速标签必须立即报错。"""
+
+    with pytest.raises(ValueError, match=error_message):
+        build_cross_validation_splits(
+            split_mode="flow_speed",
+            n_samples=n_samples,
+            flow_speeds=flow_speeds,
+        )
+
+
+@pytest.mark.parametrize(
+    "flow_speeds",
+    [
+        [0.1, 0.3, 0.4],
+        [0.1, 0.2, 0.3],
+        [0.4, 0.4, 0.4],
+    ],
+)
+def test_flow_speed_mode_requires_every_protocol_speed(
+    flow_speeds: list[float],
+) -> None:
+    """四档固定速度缺少任意一档时不能悄悄改变实验协议。"""
+
+    with pytest.raises(ValueError, match="每档至少有一个样本"):
+        build_cross_validation_splits(
+            split_mode="flow_speed",
+            n_samples=len(flow_speeds),
+            flow_speeds=flow_speeds,
+        )
 
 
 def test_legacy_group_function_remains_compatible() -> None:

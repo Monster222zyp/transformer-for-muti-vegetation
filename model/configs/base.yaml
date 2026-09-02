@@ -2,10 +2,8 @@
 seed: 20260816
 
 data:
-  # 数据整理脚本生成的八列总 CSV。
-  csv_path: model/data/all_models.csv
-  # 用于把 vegetation_layout 反查为 model_id 和 angle。
-  input_csv_path: Experiment/input.csv
+  # Experiment 汇总脚本生成的 11 列模型就绪 CSV。
+  csv_path: summarized_data.csv
   # 两种水草状态的角度分组和“状态 × 流速”单株实测阻力。
   physics_config_path: model/configs/physical.yaml
   # 当前把小量负阻力视为待验证的测量偏差并在训练时归零；噪声解释仍需传感器不确定度验证，原值继续写入预测表。
@@ -21,8 +19,8 @@ model:
   ffn_dim: 1024
   dropout: 0.05
   # 下列开关用于后续消融实验（ablation，即逐项关闭模块比较贡献）。
-  use_rope: true
-  use_relative_value: true
+  use_rope: false
+  use_relative_value: false
   use_conditional_layernorm: true
   condition_value_on_global: true
   condition_relative_value_on_global: true
@@ -52,10 +50,12 @@ training:
   checkpoint_interval_epochs: 100
 
 cross_validation:
-  # sample：逐样本随机；model：同一构型不可拆分；plant_count：相同水草根数不可拆分。
-  split_mode: plant_count
+  # flow_speed：0.1/0.2/0.3 m/s 训练，完整 0.4 m/s 同时用于 validation/test。
+  # 还可选 sample、model、plant_count；只有这三个普通模式使用下面的折数和验证比例。
+  split_mode: flow_speed
+  # flow_speed 固定只生成 fold_0，因此会忽略 n_splits。
   n_splits: 5
-  # 每个 outer-train 中再按所选模式抽取约 20% 作为验证集合。
+  # flow_speed 会忽略此值；普通模式从每个 outer-train 抽取约 20% 作为验证集合。
   validation_fraction: 0.2
 
 output:

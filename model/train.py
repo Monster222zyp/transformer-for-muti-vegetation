@@ -27,7 +27,11 @@ from model.training.losses import (
     fit_relative_drag_floor,
 )
 from model.training.metrics import compute_regression_metrics
-from model.training.splits import GroupSplit, build_cross_validation_splits
+from model.training.splits import (
+    FLOW_SPEED_SPLIT_MODE,
+    GroupSplit,
+    build_cross_validation_splits,
+)
 from model.training.trainer import (
     LOSS_NAME,
     GlobalFeatureScaler,
@@ -53,11 +57,13 @@ def parse_args() -> argparse.Namespace:
         "--mode",
         choices=("cv", "overfit"),
         default="cv",
-        help="cv 执行5折评估和全量重训；overfit 仅检查前32条样本。",
+        help=(
+            "cv 按配置执行数据划分与评估；flow_speed 固定运行一折且不全量重训，"
+            "其他模式执行多折评估和全量重训。overfit 仅检查前32条样本。"
+        ),
     )
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="YAML 配置。")
     parser.add_argument("--data", help="覆盖配置中的总 CSV 路径。")
-    parser.add_argument("--input-csv", help="覆盖 Experiment/input.csv 路径。")
     parser.add_argument("--physics-config", help="覆盖双状态物理参数 YAML 路径。")
     parser.add_argument("--artifact-dir", help="覆盖产物目录。")
     parser.add_argument("--device", help="auto、cpu 或 cuda。")
@@ -76,8 +82,6 @@ def _apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> No
 
     if args.data:
         config["data"]["csv_path"] = str(Path(args.data).resolve())
-    if args.input_csv:
-        config["data"]["input_csv_path"] = str(Path(args.input_csv).resolve())
     if args.physics_config:
         config["data"]["physics_config_path"] = str(
             Path(args.physics_config).resolve()
@@ -101,7 +105,6 @@ def _resolve_config_paths(config: dict[str, Any]) -> None:
 
     for section, key in (
         ("data", "csv_path"),
-        ("data", "input_csv_path"),
         ("data", "physics_config_path"),
         ("output", "artifact_dir"),
     ):
@@ -111,29 +114,37 @@ def _resolve_config_paths(config: dict[str, Any]) -> None:
         config[section][key] = str(configured_path.resolve())
 
 
-def _collect_split_labels(dataset: HydroDataset) -> tuple[np.ndarray, np.ndarray]:
-    """收集三种划分模式需要的 ``model_id`` 和水草根数。
+def _collect_split_labels(
+    dataset: HydroDataset,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """收集四种划分模式需要的构型、水草根数和流速标签。
 
     参数：
-        dataset: 完整的 :class:`HydroDataset`。每条样本必须包含 ``model_id`` 和
-            只保留有效植株的 ``positions``。
+        dataset: 完整的 :class:`HydroDataset`。每条样本必须包含 ``model_id``、
+            只保留有效植株的 ``positions`` 和以 m/s 为单位的 ``flow_speed``。
 
     返回值：
-        二元组 ``(model_ids, plant_counts)``。两个 NumPy 数组都与数据集等长，
-        第 ``i`` 个元素分别表示第 ``i`` 条样本的构型编号与有效水草根数。
+        三元组 ``(model_ids, plant_counts, flow_speeds)``。三个 NumPy 数组都与
+        数据集等长，第 ``i`` 个元素分别表示第 ``i`` 条样本的构型编号、有效水草
+        根数与流速。
     """
 
     model_ids: list[int] = []
     plant_counts: list[int] = []
+    flow_speeds: list[float] = []
     for index in range(len(dataset)):
         sample = dataset[index]
         model_ids.append(int(sample["model_id"]))
         # Dataset 的 positions 已经移除了 input.csv 中值为 0 的空位，所以第一维
         # 就是该样本的真实水草根数，不会把 padding 位置误算为水草。
         plant_counts.append(int(sample["positions"].shape[0]))
+        # Dataset 已把 CSV 的 flow_speed 解析为 Python float；这里保留 float64
+        # 标签供划分逻辑做带容差比较，不使用模型输入 Tensor 的 dtype。
+        flow_speeds.append(float(sample["flow_speed"]))
     return (
         np.asarray(model_ids, dtype=np.int64),
         np.asarray(plant_counts, dtype=np.int64),
+        np.asarray(flow_speeds, dtype=np.float64),
     )
 
 
@@ -158,7 +169,8 @@ def _write_fold_manifest(
         path: 输出 CSV 路径。
         dataset: 提供样本元数据的完整数据集。
         splits: 每折的 train、validation、test 索引。
-        split_mode: 本次使用的 ``sample``、``model`` 或 ``plant_count`` 模式。
+        split_mode: 本次使用的 ``sample``、``model``、``plant_count`` 或
+            ``flow_speed`` 模式。
     """
 
     rows: list[dict[str, Any]] = []
@@ -238,10 +250,11 @@ def _checkpoint_metadata(
 ) -> dict[str, Any]:
     """构造评估恢复所需的数据来源、标签策略和 held-out 索引。"""
 
+    split_mode = str(config["cross_validation"].get("split_mode", "model"))
+    validation_test_overlap = split_mode == FLOW_SPEED_SPLIT_MODE
     return {
         "checkpoint_role": checkpoint_role,
         "dataset_path": config["data"]["csv_path"],
-        "input_csv_path": config["data"]["input_csv_path"],
         "negative_target_policy": config["data"]["negative_target_policy"],
         # 保存训练目标的完整语义；评估可以忽略，断点续训必须严格核对。
         "loss_name": LOSS_NAME,
@@ -257,9 +270,10 @@ def _checkpoint_metadata(
         ),
         # 保存完整解析结果而不只保存文件路径，避免物理 YAML 后续修改影响历史模型。
         "physical_config": config["resolved_physical_config"],
-        # 保存划分语义用于科研审计；fold checkpoint 的可评估范围仍只由下方
-        # held-out test source indices 决定，validation 不会混入独立评估。
-        "split_mode": config["cross_validation"].get("split_mode", "model"),
+        # 保存划分语义用于科研审计。普通模式的 evaluation_source_indices 是独立
+        # held-out test；flow_speed 模式则明确标记 validation/test 完全重叠。
+        "split_mode": split_mode,
+        "validation_test_overlap": validation_test_overlap,
         "evaluation_source_indices": evaluation_source_indices,
     }
 
@@ -327,16 +341,25 @@ def run_overfit(
 def run_cross_validation(
     dataset: HydroDataset, config: dict[str, Any], output_dir: Path
 ) -> None:
-    """按配置执行交叉验证，随后按中位最佳 epoch 在全量数据上重训。"""
+    """按配置执行划分与评估，并按模式决定是否在全量数据上重训。"""
 
-    model_ids, plant_counts = _collect_split_labels(dataset)
+    model_ids, plant_counts, flow_speeds = _collect_split_labels(dataset)
     cv_config = config["cross_validation"]
     split_mode = str(cv_config.get("split_mode", "model"))
+    validation_test_overlap = split_mode == FLOW_SPEED_SPLIT_MODE
+    if validation_test_overlap:
+        print(
+            "flow_speed 模式：0.1/0.2/0.3 m/s 用于训练，完整 0.4 m/s "
+            "同时用于 validation 和 test；test 指标不是独立 held-out 指标，"
+            "并且本次不会生成 final_model.pt。",
+            flush=True,
+        )
     splits = build_cross_validation_splits(
         split_mode=split_mode,
         n_samples=len(dataset),
         model_ids=model_ids,
         plant_counts=plant_counts,
+        flow_speeds=flow_speeds,
         n_splits=int(cv_config["n_splits"]),
         validation_fraction=float(cv_config["validation_fraction"]),
         seed=int(config["seed"]),
@@ -390,8 +413,9 @@ def run_cross_validation(
             ),
             progress_label=f"Fold {split.fold}",
         )
-        # validation 与 test 必须使用完全相同的最优模型、train-only scaler 和
-        # relative_floor 语义。validation 用于选择 epoch，test 仍是 held-out 泛化指标。
+        # 两个角色始终使用相同的最优模型、train-only scaler 和 relative_floor。
+        # 普通模式的 test 是独立 held-out 集合；flow_speed 模式则按实验协议让
+        # validation/test 复用完整 0.4 m/s 数据，因此不能作独立泛化解释。
         validation_result = predict_dataset(
             model,
             dataset,
@@ -462,15 +486,29 @@ def run_cross_validation(
     )
     aggregate_result = {
         "split_mode": split_mode,
+        "validation_test_overlap": validation_test_overlap,
+        # 先写 false，只有普通模式的全量重训成功完成后才更新为 true。这样即使
+        # 重训中断，已落盘的指标也不会错误声称 final_model 已经生成。
+        "final_retraining_performed": False,
         "aggregate": aggregate_metrics,
         "folds": fold_summaries,
     }
-    (output_dir / "cv_metrics.json").write_text(
+    metrics_path = output_dir / "cv_metrics.json"
+    metrics_path.write_text(
         json.dumps(aggregate_result, ensure_ascii=False, indent=2, allow_nan=True),
         encoding="utf-8",
     )
     _write_rows(output_dir / "cv_predictions.csv", all_prediction_rows)
     _write_rows(output_dir / "cv_plant_coefficients.csv", all_coefficient_rows)
+
+    # 固定流速实验只需要 fold_0 的跨速度模型。0.4 m/s 已参与 early stopping，
+    # 因此既不能再把它加入训练，也不应创建声称使用全量数据的 final checkpoint。
+    if validation_test_overlap:
+        print(
+            "flow_speed 固定划分完成：已保存 fold_0 及汇总产物；"
+            "已按配置跳过全量重训。"
+        )
+        return
 
     # 中位数若为 x.5，round 采用银行家舍入并不直观，因此显式四舍五入。
     final_epochs = int(np.floor(statistics.median(best_epochs) + 0.5))
@@ -504,6 +542,12 @@ def run_cross_validation(
         ),
         progress_label="Final retraining",
     )
+    # 只有 checkpoint 已成功写出后才把指标元数据更新为“已完成全量重训”。
+    aggregate_result["final_retraining_performed"] = True
+    metrics_path.write_text(
+        json.dumps(aggregate_result, ensure_ascii=False, indent=2, allow_nan=True),
+        encoding="utf-8",
+    )
     print(f"交叉验证及全量重训完成：{final_checkpoint}")
 
 
@@ -532,7 +576,6 @@ def main() -> None:
     save_config_snapshot(config, output_dir / "resolved_config.json")
     dataset = HydroDataset(
         config["data"]["csv_path"],
-        input_csv_path=config["data"]["input_csv_path"],
         negative_target_policy=config["data"]["negative_target_policy"],
         physical_config=physical_config,
     )

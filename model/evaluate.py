@@ -29,7 +29,7 @@ DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "model" / "artifacts" / "evaluation"
 def parse_args() -> argparse.Namespace:
     """解析评估入口参数。
 
-    ``--data``、``--input-csv`` 和 ``--output-dir`` 一旦由用户显式提供，相对路径
+    ``--data`` 和 ``--output-dir`` 一旦由用户显式提供，相对路径
     都按命令执行时的当前工作目录解析；省略时采用 checkpoint 或项目根默认路径。
     """
 
@@ -38,10 +38,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--data",
         help="评估 CSV；省略时使用 checkpoint 保存的原数据路径。",
-    )
-    parser.add_argument(
-        "--input-csv",
-        help="构型定义；省略时使用 checkpoint 保存的 Experiment/input.csv。",
     )
     parser.add_argument(
         "--external-data",
@@ -57,11 +53,10 @@ def parse_args() -> argparse.Namespace:
 
 def _resolve_evaluation_paths(
     args: argparse.Namespace, metadata: dict[str, Any]
-) -> tuple[Path, Path, Path]:
-    """按“checkpoint 默认、CLI 按 cwd”规则解析数据、构型和输出路径。"""
+) -> tuple[Path, Path]:
+    """按“checkpoint 默认、CLI 按 cwd”规则解析数据和输出路径。"""
 
     saved_dataset = metadata.get("dataset_path")
-    saved_input = metadata.get("input_csv_path")
     if args.external_data and not args.data:
         raise ValueError("--external-data 必须与显式 --data 一起使用。")
     if args.data:
@@ -71,12 +66,6 @@ def _resolve_evaluation_paths(
     else:
         raise ValueError("checkpoint 未记录 dataset_path，请显式提供 --data。")
 
-    if args.input_csv:
-        input_csv_path = Path(args.input_csv).resolve()
-    elif saved_input:
-        input_csv_path = Path(saved_input).resolve()
-    else:
-        input_csv_path = (PROJECT_ROOT / "Experiment" / "input.csv").resolve()
     output_dir = (
         Path(args.output_dir).resolve()
         if args.output_dir
@@ -91,7 +80,7 @@ def _resolve_evaluation_paths(
         and not args.external_data
     ):
         raise ValueError("替换 checkpoint 原数据时必须显式添加 --external-data。")
-    return dataset_path, input_csv_path, output_dir
+    return dataset_path, output_dir
 
 
 def _indices_from_source_indices(
@@ -119,7 +108,7 @@ def _select_evaluation_indices(
     metadata: dict[str, Any],
     external_data: bool,
 ) -> tuple[np.ndarray, str]:
-    """依据 checkpoint 角色选择 held-out、in-sample 或外部评估范围。"""
+    """依据 checkpoint 角色和重叠标记选择准确的评估范围语义。"""
 
     if external_data:
         return np.arange(len(dataset), dtype=np.int64), "external"
@@ -129,7 +118,12 @@ def _select_evaluation_indices(
     if role == "fold":
         if not saved_indices:
             raise ValueError("fold checkpoint 缺少 held-out test source indices。")
-        return _indices_from_source_indices(dataset, saved_indices), "held_out"
+        indices = _indices_from_source_indices(dataset, saved_indices)
+        # flow_speed 的 test 索引也参与过 early stopping，不能沿用普通 fold 的
+        # held_out 标签；独立 scope 可防止下游表格或报告误读这个指标。
+        if bool(metadata.get("validation_test_overlap", False)):
+            return indices, "validation_test_overlap"
+        return indices, "held_out"
     if role == "final":
         return np.arange(len(dataset), dtype=np.int64), "in_sample"
     if role == "overfit":
@@ -158,7 +152,7 @@ def main() -> None:
             "请使用当前代码重新训练。"
         )
     physical_config = load_physical_config(physical_payload)
-    dataset_path, input_csv_path, output_dir = _resolve_evaluation_paths(
+    dataset_path, output_dir = _resolve_evaluation_paths(
         args, metadata
     )
 
@@ -170,7 +164,6 @@ def main() -> None:
     )
     dataset = HydroDataset(
         dataset_path,
-        input_csv_path=input_csv_path,
         negative_target_policy=negative_target_policy,
         physical_config=physical_config,
     )
@@ -187,7 +180,8 @@ def main() -> None:
         scaler,
         device,
     )
-    # 明细表逐行标记评估语义，防止离开 JSON 上下文后误读 held-out 与 in-sample。
+    # 明细表逐行标记评估语义，防止离开 JSON 上下文后误读 held-out、重叠评估
+    # 与 in-sample 数据。
     for row in result.predictions:
         row["evaluation_scope"] = evaluation_scope
     for row in result.plant_coefficients:
@@ -197,9 +191,11 @@ def main() -> None:
     context = {
         "evaluation_scope": evaluation_scope,
         "checkpoint_role": metadata.get("checkpoint_role"),
+        "validation_test_overlap": bool(
+            metadata.get("validation_test_overlap", False)
+        ),
         "checkpoint_path": str(checkpoint_path),
         "dataset_path": str(dataset_path),
-        "input_csv_path": str(input_csv_path),
         "negative_target_policy": negative_target_policy,
         "physical_config": physical_config.to_dict(),
         "sample_count": int(indices.size),

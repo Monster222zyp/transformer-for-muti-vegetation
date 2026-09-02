@@ -1,0 +1,49 @@
+# =============================================================================
+# HydroTransformer 逐株系数可解释性绘图配置
+# 所有相对路径都以本 config.yaml 所在目录为基准，而不是命令执行目录。
+# =============================================================================
+
+paths:
+  # 训练产生的 checkpoint。推荐使用全数据训练得到的 final_model.pt。
+  checkpoint_path: ../final_model.pt
+
+  # 输入 CSV 必须严格使用 summarized_data.csv 的 11 列表头与字段顺序。
+  samples_csv_path: ./summarized_data.csv
+
+  # 两类 PNG 的输出目录。
+  output_directory: output
+
+runtime:
+  # 可选 auto、cpu 或 cuda。auto 会优先使用 CUDA，否则使用 CPU。
+  device: auto
+
+visualization:
+  # 高斯标准差；训练网格的相邻点距离为 1。数值越大，连续影响越平滑。
+  gaussian_sigma: 0.85
+
+  # 连续高斯图在最外层水草中心之外扩展的六边形圈数。
+  # 设为 1 表示六边形边界向外扩大一个相邻格点距离，从而显示边缘水草的影响。
+  gaussian_boundary_padding_rings: 1.0
+
+  # 连续热图每个坐标轴的采样点数。越大越细腻，但绘制更慢。
+  heatmap_grid_size: 260
+
+  # 连续热图的等值填色层级数量；所有 sample 使用相同层级边界。
+  contour_levels: 90
+
+  # 输出图像设置。
+  image_dpi: 220
+  figure_size_inches: [7.2, 6.4]
+
+  # 两种热力图的 Matplotlib colormap 名称。
+  point_colormap: viridis
+  gaussian_colormap: magma
+
+  # 是否在有水草的格点中央显示 c 的数值。
+  annotate_coefficients: true
+
+  # 高斯热力图是否叠加水草中心位置。
+  show_plant_centers: true
+
+  # CSV 中的所有 sample 使用统一色标，便于跨 sample 比较。
+  shared_color_scale: true

@@ -10,11 +10,15 @@ import torch
 from torch import Tensor
 from torch.utils.data import Dataset
 
-from .geometry import build_layout_index, layout_to_positions, parse_layout
+from .geometry import layout_to_positions, parse_layout
 from .physics import PhysicalConfig, load_physical_config
 
 
 DATASET_COLUMNS = (
+    "model_id",
+    "angle",
+    "state",
+    "vegetation_layout",
     "TX",
     "TY",
     "TZ",
@@ -22,7 +26,6 @@ DATASET_COLUMNS = (
     "FY_0",
     "FZ",
     "flow_speed",
-    "vegetation_layout",
 )
 
 # 第一版训练协议只允许把微小负阻力截断到零。把允许值集中定义，后续若增加
@@ -31,11 +34,10 @@ SUPPORTED_NEGATIVE_TARGET_POLICIES = ("clamp_to_zero",)
 
 
 class HydroDataset(Dataset[dict[str, Any]]):
-    """读取八列总 CSV，并把每行转换为一张可变长度的水草集合。
+    """读取模型就绪 CSV，并把每行转换为一张可变长度的水草集合。
 
     参数：
-        csv_path: ``prepare_dataset.py`` 生成的八列总 CSV。
-        input_csv_path: Experiment/input.csv，用于从构型反查 ``model_id`` 和角度。
+        csv_path: 汇总脚本生成的 11 列模型就绪 CSV。
         dtype: 浮点张量类型，默认使用训练稳定且常见的 ``torch.float32``。
         negative_target_policy: 负标签处理策略；当前仅支持 ``clamp_to_zero``，即把
             负 ``FX_0`` 的训练标签设为零，同时完整保留原始标签用于审计。
@@ -48,7 +50,6 @@ class HydroDataset(Dataset[dict[str, Any]]):
     def __init__(
         self,
         csv_path: str | Path,
-        input_csv_path: str | Path,
         dtype: torch.dtype = torch.float32,
         negative_target_policy: str = "clamp_to_zero",
         physical_config: str | Path | dict[str, Any] | PhysicalConfig | None = None,
@@ -63,13 +64,11 @@ class HydroDataset(Dataset[dict[str, Any]]):
             )
 
         self.csv_path = Path(csv_path).resolve()
-        self.input_csv_path = Path(input_csv_path).resolve()
         self.dtype = dtype
         self.negative_target_policy = negative_target_policy
         # 物理参数在读取样本前完成一次严格解析。Dataset 保存解析后的不可变对象，
         # 因此每行数据只做常数时间查表，不会反复读取 YAML 文件。
         self.physical_config = load_physical_config(physical_config)
-        self.layout_index = build_layout_index(self.input_csv_path)
         self.samples = self._load_samples()
 
     def _load_samples(self) -> list[dict[str, Any]]:
@@ -86,27 +85,37 @@ class HydroDataset(Dataset[dict[str, Any]]):
                 )
             for source_index, row in enumerate(reader):
                 csv_line_number = source_index + 2
-                layout = row["vegetation_layout"].strip()
-                parse_layout(layout)
-                if layout not in self.layout_index:
-                    raise ValueError(f"总 CSV 第 {csv_line_number} 行的构型无法反查 model/angle。")
-                model_id, angle = self.layout_index[layout]
-
                 try:
-                    numeric = {column: float(row[column]) for column in DATASET_COLUMNS[:-1]}
+                    model_id = int(row["model_id"])
+                    angle = int(row["angle"])
+                    state_id = int(row["state"])
+                    numeric = {
+                        column: float(row[column])
+                        for column in ("TX", "TY", "TZ", "FX_0", "FY_0", "FZ", "flow_speed")
+                    }
                 except (TypeError, ValueError) as error:
                     raise ValueError(f"总 CSV 第 {csv_line_number} 行包含非数值字段。") from error
                 if any(value != value or abs(value) == float("inf") for value in numeric.values()):
                     raise ValueError(f"总 CSV 第 {csv_line_number} 行包含 NaN 或无穷大。")
+                if model_id < 1:
+                    raise ValueError(f"总 CSV 第 {csv_line_number} 行的 model_id 必须为正整数。")
+                layout = row["vegetation_layout"].strip()
+                parse_layout(layout)
+
+                # CSV 中的状态是上游实验元数据。再次与物理配置核对，防止角度、
+                # 状态和单株阻力在手工编辑或外部数据导入时发生静默错配。
+                expected_state_id = self.physical_config.state_for_angle(angle)
+                if state_id != expected_state_id:
+                    raise ValueError(
+                        f"总 CSV 第 {csv_line_number} 行的 state={state_id} 与 angle={angle} 不一致。"
+                    )
 
                 positions = torch.tensor(layout_to_positions(layout), dtype=self.dtype)
                 plant_count = positions.shape[0]
                 if plant_count == 0:
                     raise ValueError(f"总 CSV 第 {csv_line_number} 行没有任何水草。")
 
-                # 同一工况的所有水草朝向状态相同。状态由构型反查角度决定，单株阻力
-                # 则进一步由当前流速选择；二者都不依赖 CSV 中额外的人工作标记。
-                state_id = self.physical_config.state_for_angle(angle)
+                # 同一工况的所有水草朝向状态相同，单株阻力由已验证的状态和流速查表。
                 single_drag_value = self.physical_config.single_drag_for(
                     state_id, numeric["flow_speed"]
                 )
