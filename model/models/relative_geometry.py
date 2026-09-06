@@ -23,7 +23,7 @@ def compute_relative_positions(positions: Tensor) -> Tensor:
 
 
 class RelativeGeometryEncoder(nn.Module):
-    """将 ``[dx, dy, distance]`` 编码为每个 head 的 relative Value。
+    """将 ``[dx, abs(dy), distance]`` 编码为每个 head 的 relative Value。
 
     参数:
         n_heads: attention head 数量。
@@ -71,7 +71,15 @@ class RelativeGeometryEncoder(nn.Module):
 
         relative_position = compute_relative_positions(positions)
         distance = torch.linalg.vector_norm(relative_position, dim=-1, keepdim=True)
-        geometry_features = torch.cat((relative_position, distance), dim=-1)
+
+        # x 方向决定上下游关系，因此 relative Value 保留带符号的 dx。
+        # 水流横向关于 y 镜像对称，所以只向几何网络提供 abs(dy)，避免模型根据
+        # source 位于 target 的 y+ 或 y- 一侧学习不应存在的固定方向偏好。
+        mirror_symmetric_position = torch.stack(
+            (relative_position[..., 0], relative_position[..., 1].abs()),
+            dim=-1,
+        )
+        geometry_features = torch.cat((mirror_symmetric_position, distance), dim=-1)
         relative_value = self.geometry_network(geometry_features)
         if self.condition_on_global:
             relative_value = self.modulation(relative_value, condition)

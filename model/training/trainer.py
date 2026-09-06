@@ -13,6 +13,8 @@ from typing import Any, Callable, Sequence
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset, Subset
+from model.hydro.data import MirrorTrainingDataset
+from .config import DEFAULT_TRAINING_MIRROR_AUGMENTATION
 
 from .checkpoint import (
     CHECKPOINT_VERSION,
@@ -34,6 +36,7 @@ from .scheduler import WarmupCosineScheduler, choose_warmup_steps
 DEFAULT_EPOCH_REPORT_INTERVAL = 10
 DEFAULT_LOSS_PLOT_INTERVAL = 10
 DEFAULT_CHECKPOINT_INTERVAL = 100
+DEFAULT_MIRROR_AUGMENTATION = False
 # checkpoint 和配置使用这个稳定名称记录训练目标，防止误用旧 absolute-MSE
 # checkpoint 续训；推理加载不会检查该字段，因此旧权重仍可安全用于预测。
 LOSS_NAME = "stabilized_relative_mse"
@@ -398,7 +401,6 @@ def _move_and_normalize_batch(
     for key in (
         "positions",
         "single_drag",
-        "plant_state",
         "plant_mask",
         "global_features",
         "target_drag",
@@ -419,11 +421,17 @@ def _make_loader(
     collate_fn: Callable[[list[Any]], Any],
     shuffle: bool,
     num_workers: int,
+    mirror_augmentation: bool = DEFAULT_MIRROR_AUGMENTATION,
 ) -> DataLoader:
-    """创建只覆盖指定索引的 DataLoader。"""
+    """创建指定子集的 DataLoader；mirror_augmentation 仅由训练入口启用。"""
 
+    if not isinstance(mirror_augmentation, bool):
+        raise ValueError("training.mirror_augmentation 必须是布尔值 true 或 false。")
+    subset = Subset(dataset, [int(index) for index in indices])
+    # 必须先划分再增强，验证和测试入口使用默认值，不生成镜像样本。
+    loader_dataset = MirrorTrainingDataset(subset) if mirror_augmentation else subset
     return DataLoader(
-        Subset(dataset, [int(index) for index in indices]),
+        loader_dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
@@ -442,7 +450,6 @@ def _forward_model(
         single_drag=batch["single_drag"],
         global_features=batch["global_features"],
         plant_mask=batch["plant_mask"],
-        plant_state=batch["plant_state"],
     )
 
 
@@ -528,6 +535,9 @@ def fit_with_early_stopping(
         collate_fn,
         True,
         int(settings["num_workers"]),
+        mirror_augmentation=settings.get(
+            "mirror_augmentation", DEFAULT_TRAINING_MIRROR_AUGMENTATION
+        ),
     )
     validation_loader = _make_loader(
         dataset,
@@ -834,6 +844,9 @@ def fit_fixed_epochs(
         collate_fn,
         True,
         int(settings["num_workers"]),
+        mirror_augmentation=settings.get(
+            "mirror_augmentation", DEFAULT_TRAINING_MIRROR_AUGMENTATION
+        ),
     )
     optimizer = _build_adamw(model, settings, device)
     total_steps = epochs * len(loader)
@@ -929,6 +942,8 @@ def predict_dataset(
             masks = batch["plant_mask"].detach().cpu()
             positions = batch["positions"].detach().cpu()
             single_drag = batch["single_drag"].detach().cpu()
+            # plant_angles 仅用于结果审计，不会移动到模型设备或传入 forward。
+            plant_angles = raw_batch.get("plant_angles")
             targets = batch["target_drag"].detach().cpu()
             raw_targets = batch.get("raw_target_drag", targets).detach().cpu()
             isolated = (single_drag * masks.to(single_drag.dtype)).sum(dim=1)
@@ -938,8 +953,8 @@ def predict_dataset(
                     key: _metadata_value(raw_batch, key, row_index)
                     for key in (
                         "source_index",
+                        "sample_id",
                         "model_id",
-                        "state_id",
                         "angle",
                         "flow_speed",
                     )
@@ -968,6 +983,9 @@ def predict_dataset(
                             "plant_index": plant_index,
                             "x": float(positions[row_index, plant_index, 0]),
                             "y": float(positions[row_index, plant_index, 1]),
+                            "plant_angle": int(plant_angles[row_index, plant_index])
+                            if plant_angles is not None
+                            else int(metadata["angle"]),
                             "single_drag": float(single_drag[row_index, plant_index]),
                             "latent_coefficient": float(
                                 coefficients[row_index, plant_index]

@@ -44,8 +44,8 @@ class FlowSpeedDataset(Dataset):
                     "target_drag": torch.tensor(
                         1.0 + source_index, dtype=torch.float32
                     ),
+                    "sample_id": f"sample_{source_index}",
                     "model_id": source_index + 1,
-                    "state_id": 1,
                     "angle": 0,
                     "flow_speed": flow_speed,
                     "source_index": source_index,
@@ -76,7 +76,7 @@ def _flow_speed_config() -> dict[str, Any]:
     return {
         "seed": 17,
         "data": {
-            "csv_path": "synthetic.csv",
+            "dataset_path": "synthetic.jsonl",
             "negative_target_policy": "clamp_to_zero",
         },
         "model": {},
@@ -213,6 +213,12 @@ def test_flow_speed_training_uses_only_train_speeds_and_skips_final_model(
     assert metrics["split_mode"] == "flow_speed"
     assert metrics["validation_test_overlap"] is True
     assert metrics["final_retraining_performed"] is False
+    assert "aggregate_by_flow_speed" not in metrics
+    assert "validation_metrics_by_flow_speed" not in metrics["folds"][0]
+    assert "test_metrics_by_flow_speed" not in metrics["folds"][0]
+    assert not (
+        tmp_path / "fold_0" / "test_drag_comparison_by_flow_speed.png"
+    ).exists()
     metadata = recorded["checkpoint_metadata"]
     assert metadata["split_mode"] == "flow_speed"
     assert metadata["validation_test_overlap"] is True

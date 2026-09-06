@@ -1,6 +1,10 @@
 """HydroTransformer 核心网络及可复用基础组件。"""
 
-from .attention import HydroMultiHeadAttention
+from .attention import (
+    HydroMultiHeadAttention,
+    compute_directional_soft_penalty,
+    compute_downstream_offsets,
+)
 from .conditional_norm import ConditionalLayerNorm, FeatureWiseLinearModulation
 from .global_encoder import GlobalEncoder
 from .model import HydroTransformer, HydroTransformerConfig
@@ -18,6 +22,7 @@ __all__ = [
     "HydroTransformerConfig",
     "RelativeGeometryEncoder",
     "RotaryPositionEmbedding2D",
+    "compute_directional_soft_penalty",
+    "compute_downstream_offsets",
     "compute_relative_positions",
 ]
-

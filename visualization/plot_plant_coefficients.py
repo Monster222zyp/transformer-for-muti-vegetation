@@ -1,4 +1,4 @@
-"""从配置文件读取 checkpoint 与 sample CSV，绘制逐株预测系数热力图。
+"""从配置文件读取 checkpoint 与 sample JSONL，绘制逐株预测系数热力图。
 
 运行方式（在仓库任意位置均可）：
 
@@ -9,8 +9,8 @@
     py -3.11 interpretability/plot_plant_coefficients.py --config path/to/config.yaml
 
 脚本不会在代码中保存 checkpoint 路径、输入 sample 或绘图参数；所有可调整参数
-都位于独立的 ``config.yaml``。输入 CSV 必须采用 ``summarized_data.csv`` 的 11 列
-格式，每行代表一个 sample。
+都位于独立的 ``config.yaml``。输入 JSONL 必须采用 Experiment 生成的
+``dataset.jsonl`` 契约，每行代表一个 sample。
 
 模型输出的逐株 ``c`` 是 latent coefficient（潜在系数）。总预测阻力满足
 ``predicted_drag = Σ(c_i × single_drag_i)``，因此这里绘制的 ``c`` 不等同于可以
@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,7 +63,7 @@ from model.hydro.data import HydroDataset, collate_hydro_samples
 from model.hydro.geometry import build_hex_coordinates
 from model.hydro.physics import load_physical_config
 from model.models import HydroTransformer
-from model.training.checkpoint import load_checkpoint
+from model.training.checkpoint import CHECKPOINT_VERSION, load_checkpoint
 from model.training.trainer import GlobalFeatureScaler
 
 
@@ -72,7 +73,7 @@ class ScriptConfig:
 
     属性：
         checkpoint_path: 训练产生的 ``.pt`` checkpoint。
-        samples_csv_path: 使用 summarized_data.csv 契约的输入 CSV。
+        samples_dataset_path: 使用 dataset.jsonl 契约的输入文件。
         output_directory: PNG 输出目录。
         device_name: ``auto``、``cpu`` 或 ``cuda``。
         gaussian_sigma: 高斯影响标准差，坐标单位为相邻格点距离。
@@ -85,11 +86,11 @@ class ScriptConfig:
         gaussian_colormap: 连续高斯图 colormap 名称。
         annotate_coefficients: 是否在水草格点显示 c 数值。
         show_plant_centers: 是否在连续图叠加水草中心。
-        shared_color_scale: 是否让 CSV 中的所有 sample 共用色标。
+        shared_color_scale: 是否让 JSONL 中的所有 sample 共用色标。
     """
 
     checkpoint_path: Path
-    samples_csv_path: Path
+    samples_dataset_path: Path
     output_directory: Path
     device_name: str
     gaussian_sigma: float
@@ -107,23 +108,21 @@ class ScriptConfig:
 
 @dataclass(frozen=True)
 class SamplePrediction:
-    """一条 CSV sample 的模型推理结果。
+    """一条 JSONL sample 的模型推理结果。
 
     属性：
-        csv_row_index: CSV 中从零开始、不含表头的数据行索引。
+        dataset_row_index: JSONL 中从零开始的数据行索引。
         model_id: 实验模型编号。
         angle: 实验旋转角度，单位为 degree。
-        state_id: 水草状态编号 1 或 2。
         flow_speed: 流速，单位为 m/s。
         positions: 真实水草坐标，形状为 ``[N, 2]``。
         coefficients: 与 positions 对齐的逐株系数 c，形状为 ``[N]``。
         predicted_drag: 模型预测的总阻力，单位为 N。
     """
 
-    csv_row_index: int
+    dataset_row_index: int
     model_id: int
     angle: int
-    state_id: int
     flow_speed: float
     positions: np.ndarray
     coefficients: np.ndarray
@@ -272,10 +271,10 @@ def load_script_config(config_path: Path) -> ScriptConfig:
             config_directory,
             "paths.checkpoint_path",
         ),
-        samples_csv_path=resolve_config_path(
-            require_value(paths, "paths", "samples_csv_path"),
+        samples_dataset_path=resolve_config_path(
+            require_value(paths, "paths", "samples_dataset_path"),
             config_directory,
-            "paths.samples_csv_path",
+            "paths.samples_dataset_path",
         ),
         output_directory=resolve_config_path(
             require_value(paths, "paths", "output_directory"),
@@ -324,6 +323,10 @@ def load_model_bundle(
     if not checkpoint_path.is_file():
         raise FileNotFoundError(f"找不到 checkpoint：{checkpoint_path}")
     raw_checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    if int(raw_checkpoint.get("checkpoint_version", -1)) < CHECKPOINT_VERSION:
+        raise ValueError(
+            "checkpoint 来自旧版角度状态 Token 架构；请先使用当前模型重新训练。"
+        )
     model_config = raw_checkpoint.get("model_config")
     if not isinstance(model_config, dict):
         raise ValueError("checkpoint 缺少完整 model_config。")
@@ -347,7 +350,7 @@ def predict_all_samples(
     metadata: Mapping[str, Any],
     device: torch.device,
 ) -> list[SamplePrediction]:
-    """直接从 config 指定的 CSV 读取并逐行预测全部 sample。
+    """直接从 config 指定的 JSONL 读取并逐行预测全部 sample。
 
     参数：
         config: 完整脚本配置。
@@ -357,32 +360,33 @@ def predict_all_samples(
         device: 推理设备。
 
     返回值：
-        与输入 CSV 数据行顺序完全一致的预测结果。
+        与输入 JSONL 数据行顺序完全一致的预测结果。
     """
 
-    if not config.samples_csv_path.is_file():
-        raise FileNotFoundError(f"找不到输入 sample CSV：{config.samples_csv_path}")
+    if not config.samples_dataset_path.is_file():
+        raise FileNotFoundError(
+            f"找不到输入 sample JSONL：{config.samples_dataset_path}"
+        )
     physical_config = load_physical_config(metadata["physical_config"])
     negative_target_policy = str(metadata.get("negative_target_policy", "clamp_to_zero"))
 
-    # HydroDataset 负责严格验证 11 列表头、数值、37 位排布、state/angle 和流速物理表，
+    # HydroDataset 负责严格验证 JSONL、逐株坐标、原始角度和流速物理表，
     # 因而解释脚本与训练入口共享完全相同的输入契约。
     dataset = HydroDataset(
-        config.samples_csv_path,
+        config.samples_dataset_path,
         negative_target_policy=negative_target_policy,
         physical_config=physical_config,
     )
     predictions: list[SamplePrediction] = []
 
-    # 一次运行固定遍历 CSV 的每一行，不提供抽样或跳过选项；因此每个 sample 都会
+    # 一次运行固定遍历 JSONL 的每一行，不提供抽样或跳过选项；因此每个 sample 都会
     # 在后续绘图阶段产生一张格点图和一张连续高斯图。
-    for csv_row_index in range(len(dataset)):
-        sample = dataset[csv_row_index]
+    for dataset_row_index in range(len(dataset)):
+        sample = dataset[dataset_row_index]
         batch = collate_hydro_samples([sample])
         positions = batch["positions"].to(device)
         single_drag = batch["single_drag"].to(device)
         plant_mask = batch["plant_mask"].to(device)
-        plant_state = batch["plant_state"].to(device)
         global_features = scaler.transform(batch["global_features"].to(device))
 
         with torch.inference_mode():
@@ -391,16 +395,14 @@ def predict_all_samples(
                 single_drag=single_drag,
                 global_features=global_features,
                 plant_mask=plant_mask,
-                plant_state=plant_state,
             )
 
         plant_count = int(plant_mask[0].sum().item())
         predictions.append(
             SamplePrediction(
-                csv_row_index=csv_row_index,
+                dataset_row_index=dataset_row_index,
                 model_id=int(sample["model_id"]),
                 angle=int(sample["angle"]),
-                state_id=int(sample["state_id"]),
                 flow_speed=float(sample["flow_speed"]),
                 positions=positions[0, :plant_count].detach().cpu().numpy(),
                 coefficients=outputs["coefficient"][0, :plant_count].detach().cpu().numpy(),
@@ -568,7 +570,7 @@ def find_shared_gaussian_upper_bound(
     """逐条计算连续场最大值，获得统一色标上界且不缓存全部大网格。
 
     参数：
-        predictions: CSV 全部 sample 的预测结果。
+        predictions: JSONL 全部 sample 的预测结果。
         all_display_coordinates: 完整 37 点展示坐标。
         config: 提供高斯标准差和网格尺寸。
 
@@ -590,11 +592,11 @@ def find_shared_gaussian_upper_bound(
 
 
 def output_stem(prediction: SamplePrediction) -> str:
-    """用 CSV 行号和实验条件生成唯一、可排序的输出文件名前缀。"""
+    """用 JSONL 行号和实验条件生成唯一、可排序的输出文件名前缀。"""
 
     flow_text = f"{prediction.flow_speed:g}".replace(".", "p")
     return (
-        f"row_{prediction.csv_row_index:04d}_model_{prediction.model_id:02d}_"
+        f"row_{prediction.dataset_row_index:04d}_model_{prediction.model_id:02d}_"
         f"angle_{prediction.angle:03d}_flow_{flow_text}"
     )
 
@@ -651,8 +653,8 @@ def plot_point_coefficients(
     colorbar.set_label("latent coefficient c")
     axis.set_title(
         "逐株预测系数 c（仅有水草的格点）\n"
-        f"CSV row={prediction.csv_row_index}, model={prediction.model_id}, "
-        f"angle={prediction.angle}°, state={prediction.state_id}, "
+        f"JSONL row={prediction.dataset_row_index}, model={prediction.model_id}, "
+        f"angle={prediction.angle}°, "
         f"flow={prediction.flow_speed:g} m/s, predicted drag={prediction.predicted_drag:.4f} N"
     )
     axis.set_aspect("equal")
@@ -704,7 +706,7 @@ def plot_gaussian_influence(
     colorbar.set_label("summed Gaussian c influence")
     axis.set_title(
         "完整六边形的高斯叠加影响\n"
-        f"CSV row={prediction.csv_row_index}, σ={config.gaussian_sigma:g}, "
+        f"JSONL row={prediction.dataset_row_index}, σ={config.gaussian_sigma:g}, "
         f"model={prediction.model_id}, angle={prediction.angle}°, "
         f"flow={prediction.flow_speed:g} m/s"
     )
@@ -718,7 +720,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     """创建只负责指定独立 config 文件位置的命令行解析器。"""
 
     parser = argparse.ArgumentParser(
-        description="从 config 指定的 CSV 读取 sample，并绘制模型逐株 c 热力图。"
+        description="从 config 指定的 JSONL 读取 sample，并绘制模型逐株 c 热力图。"
     )
     parser.add_argument(
         "--config",
@@ -727,6 +729,42 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="独立 YAML 配置文件；默认 interpretability/config.yaml。",
     )
     return parser
+
+
+def prepare_output_directory(config: ScriptConfig, config_path: Path) -> None:
+    """清空输出目录内容并保留目录本身；不存在时创建。
+
+    参数：
+        config: 已校验的配置，包含输出目录以及需要保护的输入文件路径。
+        config_path: 本次使用的 YAML 文件路径，防止清理时删除配置自身。
+    """
+
+    output_directory = config.output_directory.resolve()
+    # 禁止将项目、用户目录及输入文件所在目录作为清理目标；同时保护其祖先，
+    # 避免配置误指向磁盘根目录或其他包含项目与输入的上层目录。
+    protected_paths = (
+        REPOSITORY_ROOT.resolve(),
+        Path.home().resolve(),
+        Path.cwd().resolve(),
+        config.checkpoint_path.resolve(),
+        config.samples_dataset_path.resolve(),
+        config_path.resolve(),
+    )
+    if any(path == output_directory or output_directory in path.parents for path in protected_paths):
+        raise ValueError(f"输出目录包含项目、工作目录或输入文件，拒绝清空：{output_directory}")
+
+    output_directory.mkdir(parents=True, exist_ok=True)
+    for child in output_directory.iterdir():
+        # 链接只删除链接自身；Windows junction 只移除目录入口，不遍历其目标。
+        if child.is_symlink():
+            child.unlink()
+        elif child.resolve().parent != output_directory:
+            child.rmdir()
+        elif child.is_dir():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+    print(f"[清理] 已清空输出目录：{output_directory}")
 
 
 def main() -> int:
@@ -758,7 +796,8 @@ def main() -> int:
             else None
         )
 
-        config.output_directory.mkdir(parents=True, exist_ok=True)
+        # 推理和色标计算成功后才清理旧产物，随后开始写入本次图像。
+        prepare_output_directory(config, arguments.config)
         for prediction, point_norm in zip(
             predictions,
             point_normalizations,

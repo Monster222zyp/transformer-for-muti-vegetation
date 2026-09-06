@@ -13,11 +13,19 @@ from typing import Any
 import torch
 
 
-# version 4 引入双状态 Token 和可复现的物理单株阻力表。旧单 Token checkpoint
-# 不具备新的输入语义，因此不执行不可靠的自动迁移。
-CHECKPOINT_VERSION = 4
+# version 5 移除角度状态 Token：角度只用于物理默认阻力查表，所有水草共享一个
+# 可学习 Token。旧 checkpoint 的参数结构和输入语义都不同，因此不自动迁移。
+CHECKPOINT_VERSION = 5
 # 首次替换失败后依次等待这些秒数；因此总共最多尝试 5 次原子替换。
 CHECKPOINT_RETRY_DELAYS_SECONDS = (0.2, 0.5, 1.0, 2.0)
+# Directional attention 没有新增权重。保留这些默认值可读取同一模型架构中缺少
+# 显式方向字段的早期配置快照；跨 v5 的旧角度状态 Token checkpoint 仍会先被拒绝。
+LEGACY_DIRECTIONAL_ATTENTION_DEFAULTS = {
+    "directional_attention_mode": "none",
+    "directional_soft_activation": "relu",
+    "directional_soft_strength": 1.0,
+    "directional_tolerance": 1.0e-6,
+}
 
 
 def resolved_model_config(model: torch.nn.Module) -> dict[str, Any] | None:
@@ -48,16 +56,23 @@ def _validate_model_config(
         return
     if int(checkpoint.get("checkpoint_version", -1)) < CHECKPOINT_VERSION:
         raise ValueError(
-            "checkpoint 来自旧版单 Token 架构，缺少双状态语义；请重新训练模型。"
+            "checkpoint 来自旧版角度状态 Token 架构；当前模型不再把角度状态输入"
+            "神经网络，请使用当前代码重新训练。"
         )
     expected = checkpoint.get("model_config")
-    if expected is None:
+    if not isinstance(expected, dict):
         raise ValueError("checkpoint 缺少完整 model_config，无法安全恢复 HydroTransformer。")
-    if expected != actual:
+    # 旧 v4 checkpoint 保存于 directional attention 引入之前。仅当目标模型也采用
+    # 兼容默认值时，这些缺失字段才会在补全后匹配；尝试用 soft/hard 续训仍会被拒绝。
+    normalized_expected = dict(expected)
+    for key, default_value in LEGACY_DIRECTIONAL_ATTENTION_DEFAULTS.items():
+        normalized_expected.setdefault(key, default_value)
+
+    if normalized_expected != actual:
         differing_keys = sorted(
             key
-            for key in set(expected) | set(actual)
-            if expected.get(key) != actual.get(key)
+            for key in set(normalized_expected) | set(actual)
+            if normalized_expected.get(key) != actual.get(key)
         )
         raise ValueError(
             "checkpoint 的 model_config 与当前模型不一致；差异字段："

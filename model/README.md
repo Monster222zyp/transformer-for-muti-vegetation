@@ -1,6 +1,6 @@
 # 多水草 HydroTransformer
 
-本目录包含 HydroTransformer 网络、训练与评估代码。模型直接读取仓库根目录的模型就绪数据集 `summarized_data.csv`，根据水草二维排列和流速预测该构型的总阻力。
+本目录包含 HydroTransformer 网络、训练与评估代码。模型直接读取 `Experiment/output/dataset.jsonl`，根据每根水草的二维位置和流速预测该构型的总阻力。水草原始角度只用于查询物理默认阻力，不作为神经网络输入。
 
 ## 1. 环境安装
 
@@ -12,7 +12,7 @@ py -3.11 -m pip install -r model/requirements.txt
 
 `PyTorch` 是深度学习框架；如果需要 NVIDIA 显卡加速，请根据本机 CUDA 版本使用 PyTorch 官方安装命令。默认配置的 `device: auto` 会自动检测显卡，没有显卡时使用 CPU，数据与模型统一使用 `float32`。
 
-## 2. 生成模型就绪 CSV
+## 2. 生成实验汇总 CSV 与模型 JSONL
 
 在项目根目录先完成 sensor 数据过滤，再运行实验汇总命令：
 
@@ -21,32 +21,39 @@ py -3.11 Experiment/filter_sensor_data.py
 py -3.11 Experiment/summarize_sensor_data.py
 ```
 
-`summarize_sensor_data.py` 读取 `filtered_data/model_N/` 与 `Experiment/input.csv`，直接生成根目录的 `summarized_data.csv`。它带表头，固定列顺序为：
+`summarize_sensor_data.py` 读取 `filtered_data/model_N/` 与 `Experiment/input.csv`，在 `Experiment/output/` 同时生成 `summarized_data.csv` 和 `dataset.jsonl`。CSV 带表头，固定列顺序为：
 
 ```text
-model_id,angle,state,vegetation_layout,TX,TY,TZ,FX_0,FY_0,FZ,flow_speed
+sample_id,model_id,angle,vegetation_layout,TX,TY,TZ,FX_0,FY_0,FZ,flow_speed
 ```
 
-每一行是一条“模型 × 角度 × 流速”的真实实验记录，按 `model_id → angle → flow_speed` 排序。当前严格基线为 332 条记录；四个缺测工况不会插值或补零，而是保留已有的三档流速。构型、状态和角度已经写入行中，因此不存在 `prepare_dataset`、八列中间 CSV 或审计 JSON 步骤。
+每一行是一条“模型 × 角度 × 流速”的真实实验记录，按 `model_id → angle → flow_speed` 排序。相同 model 的 `60°` 行保存顺时针旋转 60° 后的 37 位排布，而不是重复 `0°` 排布。当前严格基线为 332 条记录；四个缺测工况不会插值或补零，而是保留已有的三档流速。
+
+`dataset.jsonl` 同样一行一个 sample，并额外包含变长的 `plants` 数组。每根水草保存 `plant_index、grid_index、x、y、angle`；当前同一 sample 内每根水草的 angle 都等于 sample angle。
 
 ## 3. 输入和标签
 
-默认数据文件是仓库根目录的 `summarized_data.csv`。数据加载器会直接读取其中的 11 列，并把一行转换为：
+默认数据文件是 `Experiment/output/dataset.jsonl`。数据加载器会直接读取逐株字段，并把一行转换为：
 
 - `positions [N,2]`：N 株有效水草的二维无量纲坐标，相邻格点距离为 1；
-- `plant_state [N]`：每株水草的状态编号；`0/120/240°` 为状态 1，`60/180/300°` 为状态 2；
-- `single_drag [N]`：按“状态 × 当前流速”读取的孤立单株基准阻力；
+- `plant_angles [N]`：每根水草的原始 degree 角度，只保留用于审计和物理查表；
+- `single_drag [N]`：按“原始角度 × 当前流速”读取的孤立单株基准阻力；
 - `global_features [1]`：流速 U；
 - `target_drag`：用于训练的 `max(FX_0, 0)`；
 - `raw_target_drag`：未经截断的原始 `FX_0`，仅供审计；
-- `state_id`、`model_id`、`angle`、`flow_speed`、`source_index`：用于状态选择和结果追踪的元数据。
+- `sample_id`、`model_id`、`angle`、`flow_speed`、`source_index`：用于结果追踪的元数据。
 
 一个 batch 内的植株数不同，因此 `collate_hydro_samples` 会做动态 padding（补齐到该 batch 的最大植株数），并用 `plant_mask` 标记真实植株。padding 不参与 attention 或阻力求和。
 
-物理测量得到的单根默认阻力写在 `model/configs/physical.yaml`。该文件分别保存
-状态 1/2 在 `0.1、0.2、0.3、0.4 m/s` 下的八个正式实验阻力值，单位为 `N`。
-训练会严格拒绝缺失流速、非正数、重复角度或错误单位。两个状态始终使用不同的
-可学习初始 Token，以区分两种角度状态的相互作用特征。
+物理测量得到的单根默认阻力写在 `model/configs/physical.yaml`。该文件内部将
+`0/120/240°` 和 `60/180/300°` 分为两组，并保存各自在四档流速下的实验阻力，
+单位为 `N`。Dataset 通过 `single_drag_for_angle(angle, flow_speed)` 查询阻力；
+HydroTransformer 只接收查询结果，所有水草共享同一个可学习初始 Token。
+
+默认模型同时启用 2D RoPE 和 relative Value，使网络能够读取植物布局。方向性
+attention 约定 `x` 越大越靠上游、水流从 `x+` 一侧流向 `x-` 一侧：`none` 保留
+双向 attention，`soft` 使用可配置的 ReLU 连续降低下游 source 的权重，`hard` 则
+完全屏蔽下游 source。同一 `x` 横截面和 self-edge 在三种模式中都保持可见。
 
 流速标准化必须只使用当前训练 fold 的均值和标准差。每折的统计保存在 `fold_N/scaler.json`；评估时直接从 checkpoint 恢复，禁止使用测试集重新计算。
 
@@ -67,7 +74,8 @@ py -3.11 -m model.train --mode overfit --max-epochs 300 `
 
 `last.pt` 不再重复内嵌最优模型；恢复时会从它原目录的轻量 `best.pt` 读取最佳权重，
 因此也可以恢复到另一个 `--artifact-dir`，并在新目录重建 `best.pt`。恢复时会比较
-checkpoint 保存的完整模型配置与当前模型，避免把权重误载入结构不同的网络。
+checkpoint 保存的完整模型配置与当前模型，避免把权重误载入结构不同的网络。带
+`--resume-checkpoint` 的运行会保留输出目录中的已有文件，不执行下面的自动清理。
 
 正式划分评估：
 
@@ -90,7 +98,7 @@ py -3.11 -m model.train --mode cv
 
 ```powershell
 py -3.11 -m model.train --mode cv `
-  --data summarized_data.csv `
+  --data Experiment/output/dataset.jsonl `
   --artifact-dir model/artifacts/run_001 `
   --device auto --batch-size 32 --max-epochs 500 --seed 20260816
 ```
@@ -105,6 +113,12 @@ cross_validation:
 ```
 
 `flow_speed` 会忽略示例中的折数和验证比例；保留这两个配置是为了切回普通模式时可以直接复用。然后正常运行 `python -m model.train --mode cv`。`split_mode` 不提供命令行覆盖，避免正式实验时命令行与配置文件记录不一致。
+
+训练结果默认保存在项目内的 `model/artifacts/`，不是项目根目录下另一个可能存在的 `artifacts/`。训练开始和成功结束时都会打印解析后的绝对输出目录；`flow_speed` 的推荐模型是 `model/artifacts/fold_0/best.pt`，它按设计不会生成 `final_model.pt`。
+
+每次不带 `--resume-checkpoint` 的 fresh run 会先成功加载配置、物理参数、完整 Dataset 并验证划分，然后清空本次最终 `artifact_dir` 中的旧训练结果。这能防止从五折切换到 `flow_speed` 后残留旧 `fold_1`～`fold_4` 或 `final_model.pt`。使用 `--artifact-dir model/artifacts/run_001` 时只清理 `run_001`，不会影响兄弟实验目录。训练中途失败时旧结果已无法恢复，因此重要实验应先备份或使用新的 run 目录。
+
+为避免误删，目录中会保留 `.hydrotransformer-artifacts` ownership marker。项目默认 `model/artifacts` 及其子目录可直接管理；项目外的自定义非空目录必须已经包含内容正确的 marker。文件系统根、用户主目录、项目根、源码目录、当前工作目录、输入文件的祖先目录以及 symbolic link/Windows junction 都会被拒绝。
 
 更完整的默认值位于 `model/configs/base.yaml`。CLI 参数优先于 YAML。优化器为 AdamW：CUDA 训练启用 fused 实现，CPU 自动回退普通实现。训练使用稳定化目标相对 MSE：
 
@@ -156,13 +170,17 @@ MAPE（平均绝对百分比误差）不能除以零，所以只统计 `target_d
 
 ## 6. 训练产物与测试
 
-`model/artifacts/` 默认被 Git 忽略。主要产物有配置快照、带 `plant_count` 和 `split_mode` 的 fold 分配表、scaler、`best.pt`、`last.pt`、`history.json`、`history.csv`、逐样本预测、逐株系数和指标汇总；普通模式还会生成最终 checkpoint，`flow_speed` 不会生成。`history.csv` 的列为 `epoch`、`train_relative_mse`、`validation_relative_mse` 和 `learning_rate`。`best.pt` 是轻量评估 checkpoint，只含模型权重、scaler、配置、最佳 epoch/loss 和评估范围信息；`last.pt` 才含 optimizer、scheduler 和 history，用于断点续训。所有 checkpoint 都记录实际使用的相对分母、划分模式及 validation/test 是否重叠。默认每 100 个 epoch 更新 `last.pt`，最终 epoch 与 early stopping 时强制保存。
+`model/artifacts/` 默认被 Git 忽略，因此只显示 Git 文件的界面可能看不到训练结果，但文件仍保存在磁盘。主要产物有配置快照、带 `plant_count` 和 `split_mode` 的 fold 分配表、scaler、`best.pt`、`last.pt`、`history.json`、`history.csv`、逐样本预测、逐株系数和指标汇总；普通模式还会生成最终 checkpoint，`flow_speed` 不会生成。`history.csv` 的列为 `epoch`、`train_relative_mse`、`validation_relative_mse` 和 `learning_rate`。`best.pt` 是轻量评估 checkpoint，只含模型权重、scaler、配置、最佳 epoch/loss 和评估范围信息；`last.pt` 才含 optimizer、scheduler 和 history，用于断点续训。所有 checkpoint 都记录实际使用的相对分母、划分模式及 validation/test 是否重叠。默认每 100 个 epoch 更新 `last.pt`，最终 epoch 与 early stopping 时强制保存。
 
 checkpoint 先写入带进程 PID 和随机标识的唯一临时文件，再原子替换正式文件。Windows 短暂锁定目标文件时会按 0.2、0.5、1、2 秒自动重试；全部失败时，终端会显示完整临时文件路径，并保留该可恢复文件，不会删除或覆盖它。
 
 每个 `fold_N/` 和 `overfit/` 目录还会生成 `loss_curve.png`：横轴是 epoch，纵轴是稳定化相对 MSE loss，两条折线分别表示训练集和验证集。采样间隔由 `training.loss_plot_interval_epochs` 控制，当前 `base.yaml` 设置为每 1 个 epoch 一个点；若训练在非固定间隔位置提前停止，图中会额外保留最后一个 epoch。全量 final 重训没有验证集，因此只在 terminal 输出训练 loss，不生成伪造的双折线验证图。
 
-每个 `fold_N/` 会为 validation 和 test 各写一套结果：`*_metrics.json`、`*_predictions.csv`、`*_plant_coefficients.csv`，并分别生成 `validation_drag_comparison.png` 与 `test_drag_comparison.png`。预测图先按 `isolated_drag` 从小到大排序；相同值再按 `target_drag` 从小到大排序。横轴是排序后的样本序号，三条带点折线分别表示 `target_drag`、`predicted_drag` 和 `isolated_drag`。普通模式的根目录汇总只包含 held-out test；`flow_speed` 汇总的是与 validation 重叠的完整 `0.4 m/s` test，并通过 JSON 标记其非独立语义。
+每个 `fold_N/` 会为 validation 和 test 各写一套结果：`*_metrics.json`、`*_predictions.csv`、`*_plant_coefficients.csv`，并分别生成 `validation_drag_comparison.png` 与 `test_drag_comparison.png`。预测图先按 `isolated_drag` 从小到大排序；相同值再按 `target_drag` 从小到大排序。横轴是排序后的样本序号，三条带点折线分别表示 `target_drag`、`predicted_drag` 和 `isolated_drag`。
+
+在 `sample`、`model`、`plant_count` 三种普通模式中，每套 validation/test 结果还会增加 `*_metrics_by_flow_speed.json/csv` 和 `*_drag_comparison_by_flow_speed.png`。分组指标按 `0.1/0.2/0.3/0.4 m/s` 分别报告样本数、真实 D 均值以及完整的 MAE、RMSE、R²、MAPE、sMAPE 和 C 指标；2×2 PNG 固定用四个面板展示四档流速。根目录同时生成合并 held-out test 的 `cv_metrics_by_flow_speed.json/csv`、`cv_drag_comparison.png` 和 `cv_drag_comparison_by_flow_speed.png`，相同内容也写入 `cv_metrics.json` 的 `aggregate_by_flow_speed`。训练结束时 terminal 会打印精简分流速表格。某一 fold 缺少某档速度时，JSON/CSV 不伪造该组指标，图中对应面板显示 `No samples`。
+
+`flow_speed` 模式不生成上述四档分组文件，因为它的 validation/test 本来只有 `0.4 m/s`；其根目录汇总仍是与 validation 重叠的完整 `0.4 m/s` test，并通过 JSON 标记其非独立语义。
 
 运行不含完整训练的快速测试：
 
@@ -170,4 +188,4 @@ checkpoint 先写入带进程 PID 和随机标识的唯一临时文件，再原�
 py -3.11 -m pytest model/tests/test_training_utils.py -q
 ```
 
-划分与预测图的专项测试分别位于 `test_splits.py` 和 `test_prediction_visualization.py`；它们检查四种模式的索引语义、普通分组无泄漏、固定流速重叠、排序规则和 PNG 输出。`test_flow_speed_training.py` 进一步验证训练入口只用前三档速度拟合 scaler/loss floor，并跳过 final 重训。完整模型的几何、mask、permutation 与 forward/backward 测试位于同一测试目录的其他文件中。
+划分与预测图的专项测试分别位于 `test_splits.py` 和 `test_prediction_visualization.py`；它们检查四种模式的索引语义、普通分组无泄漏、固定流速重叠、排序规则、总体 PNG 和四面板 PNG 输出。`test_rich_flow_speed_evaluation.py` 验证普通 CV 的 fold/root 两级分流速指标与图表产物；`test_flow_speed_training.py` 进一步验证固定流速入口只用前三档速度拟合 scaler/loss floor、跳过四档评估和 final 重训；`test_artifact_directory.py` 验证旧结果清理、危险路径保护、resume 保留和输入验证顺序。完整模型的几何、mask、permutation 与 forward/backward 测试位于同一测试目录的其他文件中。

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import math
 from pathlib import Path
 
@@ -13,7 +14,6 @@ from Experiment.generator import ROTATION_MAPPING
 from Experiment.summarize_sensor_data import (
     EXPECTED_MISSING_CONDITIONS,
     OUTPUT_COLUMNS,
-    STATE_BY_ANGLE,
     calculate_trimmed_column_means,
     load_rotated_layouts,
     read_numeric_sensor_csv,
@@ -31,37 +31,48 @@ INPUT_CSV = PROJECT_ROOT / "Experiment" / "input.csv"
 
 
 @pytest.fixture(scope="module")
-def generated_dataset(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """在 pytest 临时目录生成数据，避免测试覆盖正式产物。"""
+def generated_dataset(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
+    """在 pytest 临时目录同时生成 CSV 和 JSONL，避免覆盖正式产物。"""
     temporary_directory = tmp_path_factory.mktemp("summarized_data")
     output_csv = temporary_directory / "summarized_data.csv"
-    summarize_sensor_tree(SOURCE_ROOT, output_csv, INPUT_CSV, 0.10, True, True)
-    return output_csv
+    output_jsonl = temporary_directory / "dataset.jsonl"
+    summarize_sensor_tree(
+        SOURCE_ROOT,
+        output_csv,
+        output_jsonl,
+        INPUT_CSV,
+        0.10,
+        True,
+        True,
+    )
+    return output_csv, output_jsonl
 
 
 def test_summarized_dataset_has_expected_rows_and_known_missing_conditions(
-    generated_dataset: Path,
+    generated_dataset: tuple[Path, Path],
 ) -> None:
-    """当前真实数据必须恰好为 332 行，并保留完整模型元数据。"""
-    output_csv = generated_dataset
+    """当前汇总 CSV 必须恰好为 332 行，不再保存派生 state。"""
+    output_csv, _ = generated_dataset
     with output_csv.open("r", encoding="utf-8", newline="") as csv_file:
         reader = csv.DictReader(csv_file)
         rows = list(reader)
     assert reader.fieldnames == list(OUTPUT_COLUMNS)
+    assert "state" not in reader.fieldnames
     assert len(rows) == 332
     assert all(len(row["vegetation_layout"]) == 37 and set(row["vegetation_layout"]) <= {"0", "1"} for row in rows)
-    assert all(int(row["state"]) == STATE_BY_ANGLE[int(row["angle"])] for row in rows)
+    assert len({row["sample_id"] for row in rows}) == len(rows)
     actual_conditions = {(int(row["model_id"]), int(row["angle"]), float(row["flow_speed"])) for row in rows}
     assert set(EXPECTED_MISSING_CONDITIONS).isdisjoint(actual_conditions)
     assert [(int(row["model_id"]), int(row["angle"]), float(row["flow_speed"])) for row in rows] == sorted(actual_conditions)
 
 
-def test_summarized_row_preserves_rotation_layout_state_and_flow_order(
-    generated_dataset: Path,
+def test_summarized_row_preserves_rotated_layout_and_flow_order(
+    generated_dataset: tuple[Path, Path],
 ) -> None:
-    """一条 sample 必须同时携带旋转力、旋转排布、状态和对应流速。"""
+    """一条 sample 必须同时携带旋转力、旋转排布和对应流速。"""
 
-    with generated_dataset.open("r", encoding="utf-8", newline="") as csv_file:
+    output_csv, _ = generated_dataset
+    with output_csv.open("r", encoding="utf-8", newline="") as csv_file:
         rows = list(csv.DictReader(csv_file))
     row = next(
         item
@@ -76,8 +87,8 @@ def test_summarized_row_preserves_rotation_layout_state_and_flow_order(
     )
     expected_layout = load_rotated_layouts(INPUT_CSV)[(1, 60)]
 
-    assert int(row["state"]) == 2
     assert row["vegetation_layout"] == expected_layout
+    assert row["sample_id"] == "model_001_angle_060_flow_0.1"
     assert [float(row[column]) for column in ("TX", "TY", "TZ", "FX_0", "FY_0", "FZ")] == pytest.approx(expected_means)
 
 
@@ -114,11 +125,64 @@ def test_experiment_rotation_mapping_is_clockwise_in_physical_coordinates() -> N
         assert coordinates[target_index] == pytest.approx(expected_target, abs=1e-12)
 
 
+def test_dataset_jsonl_contains_rotated_layout_and_each_plant_geometry(
+    generated_dataset: tuple[Path, Path],
+) -> None:
+    """JSONL 必须一行一个 sample，并显式保存每根水草的坐标和原始角度。"""
+
+    output_csv, output_jsonl = generated_dataset
+    with output_csv.open("r", encoding="utf-8", newline="") as csv_file:
+        csv_rows = list(csv.DictReader(csv_file))
+    records = [json.loads(line) for line in output_jsonl.read_text(encoding="utf-8").splitlines()]
+
+    assert len(records) == len(csv_rows) == 332
+    assert [record["sample_id"] for record in records] == [row["sample_id"] for row in csv_rows]
+    record = next(
+        item
+        for item in records
+        if item["model_id"] == 1 and item["angle"] == 60 and item["flow_speed"] == 0.1
+    )
+    assert record["vegetation_layout"] == "0001000000000100000000001000000001000"
+    assert all(plant["angle"] == 60 for plant in record["plants"])
+    expected_grid_indices = [
+        index for index, value in enumerate(record["vegetation_layout"]) if value == "1"
+    ]
+    assert [plant["grid_index"] for plant in record["plants"]] == expected_grid_indices
+    coordinates = build_hex_coordinates()
+    assert [
+        (plant["x"], plant["y"]) for plant in record["plants"]
+    ] == pytest.approx([coordinates[index] for index in expected_grid_indices])
+
+
+def test_same_model_uses_six_distinct_rotated_layouts(
+    generated_dataset: tuple[Path, Path],
+) -> None:
+    """model_1 的六个角度必须写入六条明确不同的已旋转 01 序列。"""
+
+    output_csv, _ = generated_dataset
+    with output_csv.open("r", encoding="utf-8", newline="") as csv_file:
+        rows = list(csv.DictReader(csv_file))
+    actual = {
+        int(row["angle"]): row["vegetation_layout"]
+        for row in rows
+        if int(row["model_id"]) == 1 and float(row["flow_speed"]) == 0.1
+    }
+    assert actual == {
+        0: "1000001000000000000000000100000000001",
+        60: "0001000000000100000000001000000001000",
+        120: "0000000000000001010001000010000000000",
+        180: "1000000000010000000000000000001000001",
+        240: "0001000000001000000000010000000001000",
+        300: "0000000000100001000101000000000000000",
+    }
+
+
 def test_dataset_clamps_negative_targets_and_preserves_raw_values(
-    generated_dataset: Path,
+    generated_dataset: tuple[Path, Path],
 ) -> None:
     """负 FX_0 仅在训练标签归零，原始值和流速特征必须保留。"""
-    dataset = HydroDataset(generated_dataset, negative_target_policy="clamp_to_zero")
+    _, output_jsonl = generated_dataset
+    dataset = HydroDataset(output_jsonl, negative_target_policy="clamp_to_zero")
     assert len(dataset) == 332
     assert dataset.negative_target_policy == "clamp_to_zero"
 
@@ -137,9 +201,12 @@ def test_dataset_rejects_unknown_negative_target_policy_before_file_access() -> 
         )
 
 
-def test_collate_dynamically_pads_with_false_mask(generated_dataset: Path) -> None:
+def test_collate_dynamically_pads_with_false_mask(
+    generated_dataset: tuple[Path, Path],
+) -> None:
     """不同植株数进入同一批次后，padding 力为零且 mask 为 False。"""
-    dataset = HydroDataset(generated_dataset)
+    _, output_jsonl = generated_dataset
+    dataset = HydroDataset(output_jsonl)
     first = dataset[0]
     sample_with_more_plants = next(
         sample for sample in dataset if sample["positions"].shape[0] > first["positions"].shape[0]
@@ -151,14 +218,14 @@ def test_collate_dynamically_pads_with_false_mask(generated_dataset: Path) -> No
     first_count = first["positions"].shape[0]
     assert not batch["plant_mask"][0, first_count:].any()
     assert torch.count_nonzero(batch["single_drag"][0, first_count:]) == 0
-    assert batch["plant_state"].dtype == torch.long
-    assert torch.count_nonzero(batch["plant_state"][0, first_count:]) == 0
+    assert batch["plant_angles"].dtype == torch.long
+    assert torch.count_nonzero(batch["plant_angles"][0, first_count:]) == 0
 
 
-def test_dataset_distinguishes_state_and_uses_state_speed_drag_table(
-    generated_dataset: Path,
+def test_dataset_uses_raw_angle_and_speed_to_select_single_drag(
+    generated_dataset: tuple[Path, Path],
 ) -> None:
-    """Dataset 必须按角度确定状态，再按状态和流速选择物理单株阻力。"""
+    """Dataset 必须直接按逐株原始角度和流速选择物理单株阻力。"""
 
     physical_payload = {
         "version": 1,
@@ -184,23 +251,22 @@ def test_dataset_distinguishes_state_and_uses_state_speed_drag_table(
             },
         },
     }
-    dataset = HydroDataset(generated_dataset, physical_config=physical_payload)
+    _, output_jsonl = generated_dataset
+    dataset = HydroDataset(output_jsonl, physical_config=physical_payload)
 
-    observed_angles = {1: set(), 2: set()}
+    observed_angles: set[int] = set()
     for sample in dataset:
-        state_id = int(sample["state_id"])
-        observed_angles[state_id].add(int(sample["angle"]))
-        expected_drag = state_id + float(sample["flow_speed"])
-        assert torch.unique(sample["plant_state"]).tolist() == [state_id]
+        angle = int(sample["angle"])
+        observed_angles.add(angle)
+        drag_group = 1 if angle in {0, 120, 240} else 2
+        expected_drag = drag_group + float(sample["flow_speed"])
+        assert torch.unique(sample["plant_angles"]).tolist() == [angle]
         torch.testing.assert_close(
             sample["single_drag"],
             torch.full_like(sample["single_drag"], expected_drag),
         )
 
-    assert observed_angles == {
-        1: {0, 120, 240},
-        2: {60, 180, 300},
-    }
+    assert observed_angles == {0, 60, 120, 180, 240, 300}
 
 
 @pytest.mark.parametrize(

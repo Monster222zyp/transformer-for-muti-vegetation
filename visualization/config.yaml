@@ -5,10 +5,10 @@
 
 paths:
   # 训练产生的 checkpoint。推荐使用全数据训练得到的 final_model.pt。
-  checkpoint_path: ../final_model.pt
+  checkpoint_path: "C:/Users/Mayn/Desktop/myfiles/Transformer project/transformer-for-muti-vegetation/model/artifacts/final_model.pt"
 
-  # 输入 CSV 必须严格使用 summarized_data.csv 的 11 列表头与字段顺序。
-  samples_csv_path: ./summarized_data.csv
+  # 输入 JSONL 必须使用 Experiment 汇总脚本生成的逐株数据契约。
+  samples_dataset_path: ../Experiment/output/dataset.jsonl
 
   # 两类 PNG 的输出目录。
   output_directory: output
@@ -45,5 +45,5 @@ visualization:
   # 高斯热力图是否叠加水草中心位置。
   show_plant_centers: true
 
-  # CSV 中的所有 sample 使用统一色标，便于跨 sample 比较。
+  # JSONL 中的所有 sample 使用统一色标，便于跨 sample 比较。
   shared_color_scale: true

@@ -1,7 +1,8 @@
-"""水草状态与物理单株基准阻力配置。
+"""水草角度分组与物理单株基准阻力配置。
 
 该模块把实验测得的单株阻力与神经网络超参数分离。训练和评估都先把 YAML
-解析为不可变的 :class:`PhysicalConfig`，随后 Dataset 只通过该对象查询状态和阻力。
+解析为不可变的 :class:`PhysicalConfig`。JSONL 不保存 state，Dataset 直接使用
+每根水草的原始角度和流速查询默认阻力；角度分组只是物理配置内部实现。
 """
 
 from __future__ import annotations
@@ -75,6 +76,25 @@ class PhysicalConfig:
         raise ValueError(
             f"状态 {state_id} 没有配置流速 {flow_speed:g} m/s 的单株阻力。"
         )
+
+    def single_drag_for_angle(self, angle: int, flow_speed: float) -> float:
+        """使用原始角度和流速查询单根水草默认阻力。
+
+        参数：
+            angle: JSONL 中逐株保存的原始角度，单位为 degree。只允许当前实验
+                六个离散角度；函数内部按 360° 归一化后匹配物理阻力组。
+            flow_speed: 当前 sample 流速，单位为 m/s。
+
+        返回值：
+            与该角度组和流速对应的单根水草默认阻力，单位为 N。
+
+        注意：
+            这个函数的返回值会作为 ``single_drag`` 进入模型，但 ``angle`` 本身
+            不会传入神经网络，因此不会成为可学习特征。
+        """
+
+        state_id = self.state_for_angle(angle)
+        return self.single_drag_for(state_id, flow_speed)
 
     def to_dict(self) -> dict[str, Any]:
         """转换为可安全写入 JSON/checkpoint 的普通字典。"""

@@ -16,7 +16,10 @@ from model.training.losses import (
     fit_relative_drag_floor,
     relative_total_drag_mse_loss,
 )
-from model.training.metrics import compute_regression_metrics
+from model.training.metrics import (
+    compute_metrics_by_flow_speed,
+    compute_regression_metrics,
+)
 from model.training.scheduler import WarmupCosineScheduler, choose_warmup_steps
 from model.training.splits import build_group_kfold_splits
 
@@ -57,6 +60,84 @@ def test_metrics_handle_zero_targets_and_report_mape_coverage() -> None:
     assert metrics["MAPE_D"] == pytest.approx(50.0)
     assert metrics["MAPE_coverage"] == pytest.approx(0.5)
     assert metrics["sMAPE_D"] == pytest.approx(100.0 / 3.0)
+
+
+def test_metrics_by_flow_speed_report_complete_sorted_groups() -> None:
+    """分流速指标应稳定排序，并包含表格信息和原有全部回归指标。"""
+
+    predictions = [
+        {
+            "flow_speed": float(np.float32(0.1)),
+            "target_drag": 1.0,
+            "predicted_drag": 1.0,
+            "isolated_drag": 1.0,
+        },
+        {
+            "flow_speed": 0.1,
+            "target_drag": 3.0,
+            "predicted_drag": 2.0,
+            "isolated_drag": 2.0,
+        },
+        {
+            "flow_speed": 0.4,
+            "target_drag": 10.0,
+            "predicted_drag": 10.0,
+            "isolated_drag": 5.0,
+        },
+        {
+            "flow_speed": 0.4,
+            "target_drag": 20.0,
+            "predicted_drag": 20.0,
+            "isolated_drag": 10.0,
+        },
+    ]
+
+    grouped = compute_metrics_by_flow_speed(predictions)
+
+    assert list(grouped) == ["0.1", "0.4"]
+    assert set(grouped["0.1"]) == {
+        "sample_count",
+        "mean_target_D",
+        "MAE_D",
+        "RMSE_D",
+        "R2",
+        "MAE_C",
+        "RMSE_C",
+        "MAPE_D",
+        "MAPE_coverage",
+        "sMAPE_D",
+    }
+    assert grouped["0.1"]["sample_count"] == 2
+    assert grouped["0.1"]["mean_target_D"] == pytest.approx(2.0)
+    assert grouped["0.1"]["MAE_D"] == pytest.approx(0.5)
+    assert grouped["0.1"]["RMSE_D"] == pytest.approx(math.sqrt(0.5))
+    assert grouped["0.1"]["R2"] == pytest.approx(0.5)
+    assert grouped["0.4"]["R2"] == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize(
+    ("row_update", "error_message"),
+    [
+        ({}, "flow_speed"),
+        ({"flow_speed": float("nan")}, "有限数值"),
+        ({"flow_speed": 0.5}, "不受支持"),
+    ],
+)
+def test_metrics_by_flow_speed_reject_invalid_speed(
+    row_update: dict[str, float],
+    error_message: str,
+) -> None:
+    """缺失、非有限或协议外的流速不能被静默分到错误分组。"""
+
+    row = {
+        "target_drag": 1.0,
+        "predicted_drag": 1.0,
+        "isolated_drag": 1.0,
+        **row_update,
+    }
+
+    with pytest.raises(ValueError, match=error_message):
+        compute_metrics_by_flow_speed([row])
 
 
 class TargetOnlyDataset:

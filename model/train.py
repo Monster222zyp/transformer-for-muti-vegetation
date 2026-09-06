@@ -20,13 +20,20 @@ import torch
 from model.hydro.data import HydroDataset, collate_hydro_samples
 from model.hydro.physics import load_physical_config
 from model.models import HydroTransformer
+from model.training.artifacts import (
+    prepare_fresh_artifact_directory,
+    prepare_resume_artifact_directory,
+)
 from model.training.config import load_config, save_config_snapshot
 from model.training.losses import (
     DEFAULT_RELATIVE_FLOOR_QUANTILE,
     RELATIVE_FLOOR_STRATEGY,
     fit_relative_drag_floor,
 )
-from model.training.metrics import compute_regression_metrics
+from model.training.metrics import (
+    compute_metrics_by_flow_speed,
+    compute_regression_metrics,
+)
 from model.training.splits import (
     FLOW_SPEED_SPLIT_MODE,
     GroupSplit,
@@ -42,11 +49,33 @@ from model.training.trainer import (
     set_reproducible_seed,
     write_prediction_result,
 )
-from model.training.visualization import write_drag_comparison_plot
+from model.training.visualization import (
+    write_drag_comparison_by_flow_speed_plot,
+    write_drag_comparison_plot,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "model" / "configs" / "base.yaml"
+DEFAULT_MANAGED_ARTIFACT_ROOT = PROJECT_ROOT / "model" / "artifacts"
+"""允许 fresh run 自动清理的项目默认产物根目录。"""
+
+MODEL_SOURCE_ROOT = PROJECT_ROOT / "model"
+"""训练源码目录；任何自动清理目标都不能等于或包含该目录。"""
+
+FLOW_SPEED_METRIC_COLUMNS = (
+    "sample_count",
+    "mean_target_D",
+    "MAE_D",
+    "RMSE_D",
+    "R2",
+    "MAE_C",
+    "RMSE_C",
+    "MAPE_D",
+    "MAPE_coverage",
+    "sMAPE_D",
+)
+"""按流速输出 CSV 时使用的固定列顺序。"""
 
 
 def parse_args() -> argparse.Namespace:
@@ -63,8 +92,8 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="YAML 配置。")
-    parser.add_argument("--data", help="覆盖配置中的总 CSV 路径。")
-    parser.add_argument("--physics-config", help="覆盖双状态物理参数 YAML 路径。")
+    parser.add_argument("--data", help="覆盖配置中的 dataset.jsonl 路径。")
+    parser.add_argument("--physics-config", help="覆盖角度阻力分组 YAML 路径。")
     parser.add_argument("--artifact-dir", help="覆盖产物目录。")
     parser.add_argument("--device", help="auto、cpu 或 cuda。")
     parser.add_argument("--batch-size", type=int, help="覆盖 batch size。")
@@ -81,7 +110,7 @@ def _apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> No
     """将用户明确给出的 CLI 参数写回最终配置。"""
 
     if args.data:
-        config["data"]["csv_path"] = str(Path(args.data).resolve())
+        config["data"]["dataset_path"] = str(Path(args.data).resolve())
     if args.physics_config:
         config["data"]["physics_config_path"] = str(
             Path(args.physics_config).resolve()
@@ -96,6 +125,8 @@ def _apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> No
         config["training"]["max_epochs"] = args.max_epochs
     if args.seed is not None:
         config["seed"] = args.seed
+
+
 def _resolve_config_paths(config: dict[str, Any]) -> None:
     """将 YAML 中的相对默认路径统一解释为相对于项目根目录。
 
@@ -104,7 +135,7 @@ def _resolve_config_paths(config: dict[str, Any]) -> None:
     """
 
     for section, key in (
-        ("data", "csv_path"),
+        ("data", "dataset_path"),
         ("data", "physics_config_path"),
         ("output", "artifact_dir"),
     ):
@@ -148,6 +179,40 @@ def _collect_split_labels(
     )
 
 
+def _prepare_cross_validation_splits(
+    dataset: HydroDataset,
+    config: dict[str, Any],
+) -> tuple[str, list[GroupSplit]]:
+    """在清理旧产物前验证配置并构建本次 CV 划分。
+
+    参数：
+        dataset: 已完整加载并通过数据契约校验的数据集。
+        config: 合并默认值且已应用 CLI 覆盖的训练配置。
+
+    返回值：
+        二元组 ``(split_mode, splits)``；第二项可直接交给
+        :func:`run_cross_validation`，避免清理后再次构建产生差异。
+
+    异常：
+        ValueError: 模式、折数、验证比例或划分标签不满足要求时，由划分模块抛出。
+    """
+
+    model_ids, plant_counts, flow_speeds = _collect_split_labels(dataset)
+    cv_config = config["cross_validation"]
+    split_mode = str(cv_config.get("split_mode", "model"))
+    splits = build_cross_validation_splits(
+        split_mode=split_mode,
+        n_samples=len(dataset),
+        model_ids=model_ids,
+        plant_counts=plant_counts,
+        flow_speeds=flow_speeds,
+        n_splits=int(cv_config["n_splits"]),
+        validation_fraction=float(cv_config["validation_fraction"]),
+        seed=int(config["seed"]),
+    )
+    return split_mode, splits
+
+
 def _write_scaler(path: Path, scaler: GlobalFeatureScaler) -> None:
     """保存人类可读的训练集标准化统计。"""
 
@@ -155,6 +220,65 @@ def _write_scaler(path: Path, scaler: GlobalFeatureScaler) -> None:
     path.write_text(
         json.dumps(scaler.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
     )
+
+
+def _write_metrics_by_flow_speed(
+    output_dir: Path,
+    prefix: str,
+    metrics_by_flow_speed: dict[str, dict[str, float | int]],
+) -> None:
+    """把按流速分组的指标同时写成 JSON 和 CSV。
+
+    参数:
+        output_dir: 当前根产物目录或 fold 目录。
+        prefix: 文件名前缀，例如 ``cv``、``validation`` 或 ``test``。
+        metrics_by_flow_speed: ``compute_metrics_by_flow_speed`` 返回的嵌套字典。
+    """
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    json_path = output_dir / f"{prefix}_metrics_by_flow_speed.json"
+    json_path.write_text(
+        json.dumps(metrics_by_flow_speed, ensure_ascii=False, indent=2, allow_nan=True),
+        encoding="utf-8",
+    )
+
+    # CSV 第一列显式保存流速，后续列固定排序，方便 Excel 和分析脚本稳定读取。
+    csv_path = output_dir / f"{prefix}_metrics_by_flow_speed.csv"
+    with csv_path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["flow_speed", *FLOW_SPEED_METRIC_COLUMNS],
+        )
+        writer.writeheader()
+        for speed, metrics in metrics_by_flow_speed.items():
+            writer.writerow({"flow_speed": speed, **metrics})
+
+
+def _print_metrics_by_flow_speed_table(
+    metrics_by_flow_speed: dict[str, dict[str, float | int]],
+) -> None:
+    """在训练结束时打印便于快速比较的分流速指标表。
+
+    完整十列数据保存在 JSON/CSV；控制台只展示最常用的样本数、真实 D 均值、
+    MAE、RMSE、R² 和 sMAPE，避免一行过宽而难以阅读。
+    """
+
+    print("按流速汇总的 held-out test 指标：", flush=True)
+    print(
+        "flow(m/s) | samples | mean_target_D | MAE_D | RMSE_D | R2 | sMAPE_D(%)",
+        flush=True,
+    )
+    for speed, metrics in metrics_by_flow_speed.items():
+        print(
+            f"{speed:>9} | "
+            f"{int(metrics['sample_count']):>7d} | "
+            f"{float(metrics['mean_target_D']):>13.6f} | "
+            f"{float(metrics['MAE_D']):>5.6f} | "
+            f"{float(metrics['RMSE_D']):>6.6f} | "
+            f"{float(metrics['R2']):>8.6f} | "
+            f"{float(metrics['sMAPE_D']):>11.6f}",
+            flush=True,
+        )
 
 
 def _write_fold_manifest(
@@ -188,10 +312,10 @@ def _write_fold_manifest(
                         "role": role,
                         "dataset_index": int(index),
                         "source_index": int(sample["source_index"]),
+                        "sample_id": str(sample["sample_id"]),
                         "model_id": int(sample["model_id"]),
                         "plant_count": int(sample["positions"].shape[0]),
                         "split_mode": split_mode,
-                        "state_id": int(sample["state_id"]),
                         "angle": int(sample["angle"]),
                         "flow_speed": float(sample["flow_speed"]),
                     }
@@ -254,7 +378,7 @@ def _checkpoint_metadata(
     validation_test_overlap = split_mode == FLOW_SPEED_SPLIT_MODE
     return {
         "checkpoint_role": checkpoint_role,
-        "dataset_path": config["data"]["csv_path"],
+        "dataset_path": config["data"]["dataset_path"],
         "negative_target_policy": config["data"]["negative_target_policy"],
         # 保存训练目标的完整语义；评估可以忽略，断点续训必须严格核对。
         "loss_name": LOSS_NAME,
@@ -339,13 +463,25 @@ def run_overfit(
 
 
 def run_cross_validation(
-    dataset: HydroDataset, config: dict[str, Any], output_dir: Path
+    dataset: HydroDataset,
+    config: dict[str, Any],
+    output_dir: Path,
+    prepared_splits: tuple[str, list[GroupSplit]] | None = None,
 ) -> None:
-    """按配置执行划分与评估，并按模式决定是否在全量数据上重训。"""
+    """按配置执行划分与评估，并按模式决定是否在全量数据上重训。
 
-    model_ids, plant_counts, flow_speeds = _collect_split_labels(dataset)
-    cv_config = config["cross_validation"]
-    split_mode = str(cv_config.get("split_mode", "model"))
+    参数：
+        dataset: 已加载的完整数据集。
+        config: 当前运行的完整配置。
+        output_dir: 已安全初始化的产物目录。
+        prepared_splits: 可选的预验证 ``(split_mode, splits)``。训练总入口会在清理旧
+            产物前传入它；直接调用本函数时省略即可按原行为即时构建。
+    """
+
+    if prepared_splits is None:
+        split_mode, splits = _prepare_cross_validation_splits(dataset, config)
+    else:
+        split_mode, splits = prepared_splits
     validation_test_overlap = split_mode == FLOW_SPEED_SPLIT_MODE
     if validation_test_overlap:
         print(
@@ -354,16 +490,6 @@ def run_cross_validation(
             "并且本次不会生成 final_model.pt。",
             flush=True,
         )
-    splits = build_cross_validation_splits(
-        split_mode=split_mode,
-        n_samples=len(dataset),
-        model_ids=model_ids,
-        plant_counts=plant_counts,
-        flow_speeds=flow_speeds,
-        n_splits=int(cv_config["n_splits"]),
-        validation_fraction=float(cv_config["validation_fraction"]),
-        seed=int(config["seed"]),
-    )
     _write_fold_manifest(
         output_dir / "fold_assignments.csv", dataset, splits, split_mode
     )
@@ -456,22 +582,60 @@ def run_cross_validation(
             fold_dir / "test_drag_comparison.png",
             title=f"Fold {split.fold} test drag comparison",
         )
+
+        # 普通 CV 的 validation/test 通常同时包含四档流速，因此在总体图旁增加
+        # 2×2 分流速图，并把每档完整指标独立落盘。flow_speed 模式的两个集合
+        # 只有 0.4 m/s，继续使用总体图即可，避免生成三个没有统计意义的空面板。
+        validation_metrics_by_flow_speed = None
+        test_metrics_by_flow_speed = None
+        if not validation_test_overlap:
+            validation_metrics_by_flow_speed = compute_metrics_by_flow_speed(
+                validation_result.predictions
+            )
+            test_metrics_by_flow_speed = compute_metrics_by_flow_speed(
+                test_result.predictions
+            )
+            _write_metrics_by_flow_speed(
+                fold_dir,
+                "validation",
+                validation_metrics_by_flow_speed,
+            )
+            _write_metrics_by_flow_speed(
+                fold_dir,
+                "test",
+                test_metrics_by_flow_speed,
+            )
+            write_drag_comparison_by_flow_speed_plot(
+                validation_result.predictions,
+                fold_dir / "validation_drag_comparison_by_flow_speed.png",
+                title=f"Fold {split.fold} validation drag comparison by flow speed",
+            )
+            write_drag_comparison_by_flow_speed_plot(
+                test_result.predictions,
+                fold_dir / "test_drag_comparison_by_flow_speed.png",
+                title=f"Fold {split.fold} test drag comparison by flow speed",
+            )
+
         all_prediction_rows.extend(test_result.predictions)
         all_coefficient_rows.extend(test_result.plant_coefficients)
-        fold_summaries.append(
-            {
-                "fold": split.fold,
-                "best_epoch": fit_result.best_epoch,
-                "best_validation_relative_MSE": fit_result.best_validation_loss,
-                "relative_floor": relative_floor,
-                "split_mode": split_mode,
-                # 保留原有顶层 test 指标，兼容已经读取 cv_metrics.json 的分析脚本；
-                # 同时增加两个具名对象，使 validation/test 的含义更直观。
-                "validation_metrics": validation_result.metrics,
-                "test_metrics": test_result.metrics,
-                **test_result.metrics,
-            }
-        )
+        fold_summary = {
+            "fold": split.fold,
+            "best_epoch": fit_result.best_epoch,
+            "best_validation_relative_MSE": fit_result.best_validation_loss,
+            "relative_floor": relative_floor,
+            "split_mode": split_mode,
+            # 保留原有顶层 test 指标，兼容已经读取 cv_metrics.json 的分析脚本；
+            # 同时增加两个具名对象，使 validation/test 的含义更直观。
+            "validation_metrics": validation_result.metrics,
+            "test_metrics": test_result.metrics,
+            **test_result.metrics,
+        }
+        if not validation_test_overlap:
+            fold_summary["validation_metrics_by_flow_speed"] = (
+                validation_metrics_by_flow_speed
+            )
+            fold_summary["test_metrics_by_flow_speed"] = test_metrics_by_flow_speed
+        fold_summaries.append(fold_summary)
         best_epochs.append(fit_result.best_epoch)
         print(
             f"Fold {split.fold} 完成：best_epoch={fit_result.best_epoch}, "
@@ -493,6 +657,18 @@ def run_cross_validation(
         "aggregate": aggregate_metrics,
         "folds": fold_summaries,
     }
+
+    # 普通 CV 的合并 test 预测是 out-of-fold 结果：每条样本只在未参与该 fold
+    # 训练与 early stopping 时被预测一次。直接在逐样本行上重新计算分组指标，
+    # 避免错误地平均各 fold 的 RMSE 或 R²。
+    aggregate_metrics_by_flow_speed = None
+    if not validation_test_overlap:
+        aggregate_metrics_by_flow_speed = compute_metrics_by_flow_speed(
+            all_prediction_rows
+        )
+        aggregate_result["aggregate_by_flow_speed"] = (
+            aggregate_metrics_by_flow_speed
+        )
     metrics_path = output_dir / "cv_metrics.json"
     metrics_path.write_text(
         json.dumps(aggregate_result, ensure_ascii=False, indent=2, allow_nan=True),
@@ -500,6 +676,26 @@ def run_cross_validation(
     )
     _write_rows(output_dir / "cv_predictions.csv", all_prediction_rows)
     _write_rows(output_dir / "cv_plant_coefficients.csv", all_coefficient_rows)
+
+    if aggregate_metrics_by_flow_speed is not None:
+        _write_metrics_by_flow_speed(
+            output_dir,
+            "cv",
+            aggregate_metrics_by_flow_speed,
+        )
+        # 根目录图直接展示所有 fold 合并后的 held-out test 预测；这比任意单折图
+        # 更适合作为整次交叉验证的总体结果。
+        write_drag_comparison_plot(
+            all_prediction_rows,
+            output_dir / "cv_drag_comparison.png",
+            title="Cross-validation held-out drag comparison",
+        )
+        write_drag_comparison_by_flow_speed_plot(
+            all_prediction_rows,
+            output_dir / "cv_drag_comparison_by_flow_speed.png",
+            title="Cross-validation held-out drag comparison by flow speed",
+        )
+        _print_metrics_by_flow_speed_table(aggregate_metrics_by_flow_speed)
 
     # 固定流速实验只需要 fold_0 的跨速度模型。0.4 m/s 已参与 early stopping，
     # 因此既不能再把它加入训练，也不应创建声称使用全量数据的 final checkpoint。
@@ -561,7 +757,7 @@ def _write_rows(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def main() -> None:
-    """加载配置和数据，派发 overfit 或 CV 流程。"""
+    """验证输入、安全初始化输出目录，再派发 overfit 或 CV 流程。"""
     print("CUDA available:", torch.cuda.is_available())
     args = parse_args()
     if args.mode == "cv" and args.resume_checkpoint:
@@ -569,20 +765,74 @@ def main() -> None:
     config = load_config(args.config)
     _resolve_config_paths(config)
     _apply_cli_overrides(config, args)
-    output_dir = Path(config["output"]["artifact_dir"])
-    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 先完整加载物理表和 JSONL。若输入无效，程序会在触碰旧训练结果前失败，避免因为
+    # 拼错数据路径或 YAML 内容而丢失上一次可用实验。
     physical_config = load_physical_config(config["data"]["physics_config_path"])
     config["resolved_physical_config"] = physical_config.to_dict()
-    save_config_snapshot(config, output_dir / "resolved_config.json")
     dataset = HydroDataset(
-        config["data"]["csv_path"],
+        config["data"]["dataset_path"],
         negative_target_policy=config["data"]["negative_target_policy"],
         physical_config=physical_config,
     )
+
+    # CV 划分同样在清理前完成验证。这样 split_mode 拼写错误、分组不足或固定速度
+    # 缺档时都会保留旧结果；返回的索引随后直接复用，不会重复随机划分。
+    prepared_splits: tuple[str, list[GroupSplit]] | None = None
+    if args.mode == "cv":
+        prepared_splits = _prepare_cross_validation_splits(dataset, config)
+
+    configured_output_dir = Path(config["output"]["artifact_dir"])
+    print(f"训练产物目录：{configured_output_dir.resolve()}", flush=True)
+    if args.resume_checkpoint:
+        output_dir = prepare_resume_artifact_directory(configured_output_dir)
+        print(
+            "检测到 --resume-checkpoint：保留产物目录中的已有 checkpoint 和 history，"
+            "跳过自动清理。",
+            flush=True,
+        )
+    else:
+        # fresh run 只允许清理最终解析出的 artifact_dir。保护列表覆盖项目源码、当前
+        # 工作目录、用户目录以及本次已经验证过的全部输入文件。
+        config_path = Path(args.config).expanduser().resolve(strict=False)
+        protected_paths = (
+            Path.home(),
+            Path.cwd(),
+            PROJECT_ROOT,
+            MODEL_SOURCE_ROOT,
+            config_path,
+            Path(config["data"]["dataset_path"]),
+            Path(config["data"]["physics_config_path"]),
+        )
+        output_dir = prepare_fresh_artifact_directory(
+            configured_output_dir,
+            managed_root=DEFAULT_MANAGED_ARTIFACT_ROOT,
+            protected_paths=protected_paths,
+        )
+        print("已清空该产物目录中的旧训练结果。", flush=True)
+
+    # 将安全初始化后的规范化路径写回快照，保证日志、配置和实际文件位置一致。
+    config["output"]["artifact_dir"] = str(output_dir)
+    save_config_snapshot(config, output_dir / "resolved_config.json")
     if args.mode == "overfit":
         run_overfit(dataset, config, output_dir, args.resume_checkpoint)
+        recommended_checkpoint = output_dir / "overfit" / "best.pt"
     else:
-        run_cross_validation(dataset, config, output_dir)
+        run_cross_validation(
+            dataset,
+            config,
+            output_dir,
+            prepared_splits=prepared_splits,
+        )
+        split_mode = str(config["cross_validation"].get("split_mode", "model"))
+        if split_mode == FLOW_SPEED_SPLIT_MODE:
+            recommended_checkpoint = output_dir / "fold_0" / "best.pt"
+        else:
+            recommended_checkpoint = output_dir / "final_model.pt"
+    print(
+        f"训练结果已保存至：{output_dir}\n推荐 checkpoint：{recommended_checkpoint}",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

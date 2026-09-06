@@ -6,6 +6,12 @@ from typing import Dict, List, Optional, Union
 import torch
 from torch import Tensor, nn
 
+from .attention import (
+    DEFAULT_DIRECTIONAL_ATTENTION_MODE,
+    DEFAULT_DIRECTIONAL_SOFT_ACTIVATION,
+    DEFAULT_DIRECTIONAL_SOFT_STRENGTH,
+    DEFAULT_DIRECTIONAL_TOLERANCE,
+)
 from .coefficient_head import CoefficientHead
 from .global_encoder import GlobalEncoder
 from .transformer_block import HydroTransformerBlock
@@ -16,12 +22,11 @@ class HydroTransformerConfig:
     """HydroTransformer 的可序列化配置。
 
     默认值对应项目确认的第一版：256 维、8 heads、4 blocks、1024 维 FFN。
-    五个布尔开关允许独立进行 RoPE、relative Value 和三条全局条件路径的消融。
+    五个布尔开关允许独立进行 RoPE、relative Value 和三条全局条件路径的消融；
+    directional attention 字段控制下游 source 到上游 target 的消息约束。
     """
 
     global_input_dim: int = 1
-    # 真实水草状态固定为 1 和 2；状态 0 在 Embedding 中保留给 padding。
-    num_plant_states: int = 2
     global_hidden_dim: int = 64
     d_model: int = 256
     n_heads: int = 8
@@ -38,6 +43,10 @@ class HydroTransformerConfig:
     use_conditional_layernorm: bool = True
     condition_value_on_global: bool = True
     condition_relative_value_on_global: bool = True
+    directional_attention_mode: str = DEFAULT_DIRECTIONAL_ATTENTION_MODE
+    directional_soft_activation: str = DEFAULT_DIRECTIONAL_SOFT_ACTIVATION
+    directional_soft_strength: float = DEFAULT_DIRECTIONAL_SOFT_STRENGTH
+    directional_tolerance: float = DEFAULT_DIRECTIONAL_TOLERANCE
 
 
 class HydroTransformer(nn.Module):
@@ -55,7 +64,7 @@ class HydroTransformer(nn.Module):
     def __init__(
         self,
         config: Optional[HydroTransformerConfig] = None,
-        **overrides: Union[int, float, bool],
+        **overrides: Union[int, float, bool, str],
     ) -> None:
         super().__init__()
         base_values = asdict(config or HydroTransformerConfig())
@@ -69,21 +78,13 @@ class HydroTransformer(nn.Module):
 
         if cfg.n_layers < 1:
             raise ValueError("n_layers 必须至少为 1。")
-        if cfg.num_plant_states != 2:
-            raise ValueError("当前实验协议要求 num_plant_states 固定为 2。")
         if cfg.log_coefficient_min >= cfg.log_coefficient_max:
             raise ValueError("log_coefficient_min 必须小于 log_coefficient_max。")
 
-        # 索引 1/2 是两个相互独立、可学习的初始 Token；索引 0 是固定的 padding
-        # 向量。Embedding 让 Dataset 的状态编号可以直接映射到对应 Token。
-        self.plant_tokens = nn.Embedding(
-            cfg.num_plant_states + 1,
-            cfg.d_model,
-            padding_idx=0,
-        )
-        nn.init.normal_(self.plant_tokens.weight, mean=0.0, std=0.02)
-        with torch.no_grad():
-            self.plant_tokens.weight[0].zero_()
+        # 所有真实水草共享同一个可学习初始 Token。角度只在 Dataset 中用于查询
+        # single_drag，不再通过状态 Embedding 间接进入神经网络。
+        self.plant_token = nn.Parameter(torch.empty(cfg.d_model))
+        nn.init.normal_(self.plant_token, mean=0.0, std=0.02)
         self.global_encoder = GlobalEncoder(
             cfg.global_input_dim, cfg.global_hidden_dim, cfg.d_model
         )
@@ -102,6 +103,10 @@ class HydroTransformer(nn.Module):
                     condition_value_on_global=cfg.condition_value_on_global,
                     condition_relative_value_on_global=cfg.condition_relative_value_on_global,
                     rope_base=cfg.rope_base,
+                    directional_attention_mode=cfg.directional_attention_mode,
+                    directional_soft_activation=cfg.directional_soft_activation,
+                    directional_soft_strength=cfg.directional_soft_strength,
+                    directional_tolerance=cfg.directional_tolerance,
                 )
                 for _ in range(cfg.n_layers)
             ]
@@ -114,7 +119,6 @@ class HydroTransformer(nn.Module):
         single_drag: Tensor,
         global_features: Tensor,
         plant_mask: Tensor,
-        plant_state: Tensor,
     ) -> None:
         """在矩阵运算前报告容易理解的输入形状和类型错误。"""
 
@@ -125,19 +129,9 @@ class HydroTransformer(nn.Module):
             raise ValueError("single_drag 必须是 [B,N]，并与 positions 对齐。")
         if plant_mask.shape != expected_plant_shape or plant_mask.dtype != torch.bool:
             raise ValueError("plant_mask 必须是与 positions 对齐的 bool 张量 [B,N]。")
-        if plant_state.shape != expected_plant_shape or plant_state.dtype != torch.long:
-            raise ValueError("plant_state 必须是与 positions 对齐的 int64 张量 [B,N]。")
         if global_features.ndim != 2 or global_features.shape[0] != positions.shape[0]:
             raise ValueError("global_features 必须是 [B,G]。")
 
-        valid_states = plant_state[plant_mask]
-        if valid_states.numel() and (
-            torch.any(valid_states < 1)
-            or torch.any(valid_states > self.config.num_plant_states)
-        ):
-            raise ValueError("有效水草的 plant_state 只能为 1 或 2。")
-        if torch.any(plant_state[~plant_mask] != 0):
-            raise ValueError("padding 位置的 plant_state 必须为 0。")
         if torch.any(single_drag[plant_mask] <= 0):
             raise ValueError("有效水草的 single_drag 必须大于 0。")
         if torch.any(single_drag[~plant_mask] != 0):
@@ -149,7 +143,6 @@ class HydroTransformer(nn.Module):
         single_drag: Tensor,
         global_features: Tensor,
         plant_mask: Tensor,
-        plant_state: Tensor,
         return_attention: bool = False,
     ) -> Dict[str, Union[Tensor, List[Tensor]]]:
         """执行总阻力预测。
@@ -159,7 +152,6 @@ class HydroTransformer(nn.Module):
             single_drag: ``[B,N]``，孤立单株阻力；padding 位置应为 0。
             global_features: ``[B,G]``，当前第一版只含标准化流速。
             plant_mask: ``[B,N]`` bool；``True`` 代表真实植物。
-            plant_state: ``[B,N]`` int64；有效水草取值为 1/2，padding 为 0。
             return_attention: 是否额外返回每一层的 attention 权重。
 
         返回:
@@ -168,14 +160,14 @@ class HydroTransformer(nn.Module):
             block 数的 ``attention`` 列表，每项形状为 ``[B,H,N,N]``。
         """
 
-        self._validate_inputs(
-            positions, single_drag, global_features, plant_mask, plant_state
-        )
+        self._validate_inputs(positions, single_drag, global_features, plant_mask)
         mask_as_float = plant_mask.to(dtype=positions.dtype)
 
-        # 每株水草按状态选择初始 Token。当前一个样本内状态相同，但保留逐株张量接口，
-        # 可保证 padding 与未来可能出现的混合状态排列都能被明确表达。
-        hidden_states = self.plant_tokens(plant_state)
+        # 共享 Token 扩展到 batch 中每一个水草位置；padding 随后由 mask 归零。
+        # positions、single_drag 和流速仍保留模型所需信息，但原始 angle 不在输入中。
+        hidden_states = self.plant_token.view(1, 1, -1).expand(
+            positions.shape[0], positions.shape[1], -1
+        )
         hidden_states = hidden_states * mask_as_float.unsqueeze(-1)
         condition = self.global_encoder(global_features)
 

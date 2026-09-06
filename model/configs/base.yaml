@@ -2,28 +2,33 @@
 seed: 20260816
 
 data:
-  # Experiment 汇总脚本生成的 11 列模型就绪 CSV。
-  csv_path: summarized_data.csv
-  # 两种水草状态的角度分组和“状态 × 流速”单株实测阻力。
+  # Experiment 汇总脚本生成、包含逐株 x/y/angle 的模型 JSONL。
+  dataset_path: C:\Users\Mayn\Desktop\myfiles\Transformer project\transformer-for-muti-vegetation\dataset.jsonl
+  # 两组原始角度和“角度组 × 流速”单株实测阻力。
   physics_config_path: model/configs/physical.yaml
   # 当前把小量负阻力视为待验证的测量偏差并在训练时归零；噪声解释仍需传感器不确定度验证，原值继续写入预测表。
   negative_target_policy: clamp_to_zero
 
 model:
   global_input_dim: 1
-  # 状态 1/2 分别使用一个可学习的初始 Token；该值按实验协议固定为 2。
-  num_plant_states: 2
   d_model: 256
   n_heads: 8
   n_layers: 4
   ffn_dim: 1024
   dropout: 0.05
   # 下列开关用于后续消融实验（ablation，即逐项关闭模块比较贡献）。
-  use_rope: false
-  use_relative_value: false
+  use_rope: true
+  use_relative_value: true
   use_conditional_layernorm: true
   condition_value_on_global: true
   condition_relative_value_on_global: true
+  # x 越大越靠上游；水流从 x+ 一侧流向 x- 一侧。
+  # soft 使用 ReLU(x_target-x_source-tolerance) 惩罚下游 source，但不完全屏蔽。
+  #none soft hard 分别表示不使用、使用软屏蔽和使用硬屏蔽；hard 会直接将下游 source 的注意力权重置零。
+  directional_attention_mode: none
+  directional_soft_activation: relu
+  directional_soft_strength: 1.0
+  directional_tolerance: 0.000001
 
 training:
   # 训练目标：((预测总阻力-真实总阻力)/max(|真实值|, 分母下限))^2 的 batch 平均值。
@@ -33,6 +38,9 @@ training:
   # 取训练集正标签的 5% 分位数；零标签继续参与 loss，并使用该下限作分母。
   relative_loss_floor_quantile: 0.05
   batch_size: 32
+  # true：每条训练样本额外生成 y→-y、angle→(-angle)%360 的镜像；false：不增强。
+  # 仅影响训练，validation/test 始终使用原始样本。
+  mirror_augmentation: false
   learning_rate: 0.0003
   weight_decay: 0.0001
   max_epochs: 500
@@ -52,7 +60,7 @@ training:
 cross_validation:
   # flow_speed：0.1/0.2/0.3 m/s 训练，完整 0.4 m/s 同时用于 validation/test。
   # 还可选 sample、model、plant_count；只有这三个普通模式使用下面的折数和验证比例。
-  split_mode: flow_speed
+  split_mode: plant_count
   # flow_speed 固定只生成 fold_0，因此会忽略 n_splits。
   n_splits: 5
   # flow_speed 会忽略此值；普通模式从每个 outer-train 抽取约 20% 作为验证集合。

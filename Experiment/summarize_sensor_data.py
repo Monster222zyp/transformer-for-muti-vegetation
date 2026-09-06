@@ -1,9 +1,10 @@
-"""将滤波后的传感器序列整理为单一、模型就绪的 CSV 数据集。
+"""将滤波后的传感器序列整理为实验汇总 CSV 和模型数据 JSONL。
 
 每个输出行代表一个 ``model_id × angle × flow_speed`` 实验 sample。脚本先对
 六轴传感器序列进行逐列截尾平均，再把 ``FX/FY`` 旋转到 0° 坐标系，最后补齐
-模型编号、旋转后的 37 位水草排布和水草状态。输出表可由 ``HydroDataset`` 直接
-读取，不再需要按角度拆分的中间 CSV 或 model/prepare_dataset.py。
+模型编号和旋转后的 37 位水草排布。``summarized_data.csv`` 用于人工审计；
+``dataset.jsonl`` 额外展开每根水草的固定坐标和原始角度，供 ``HydroDataset``
+直接读取。角度只用于物理默认阻力查表，不作为神经网络输入。
 """
 
 from __future__ import annotations
@@ -11,7 +12,9 @@ from __future__ import annotations
 import argparse
 import csv
 import importlib.util
+import json
 import re
+import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Callable, Sequence
@@ -31,21 +34,34 @@ except ModuleNotFoundError:  # pragma: no cover - 由包方式导入时使用。
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 
-# 命令行可以覆盖这些默认路径，便于处理另一批实验数据。
-inputpath = REPO_ROOT / "filtered_data"
-outputpath = REPO_ROOT / "summarized_data.csv"
-layoutpath = SCRIPT_DIR / "input.csv"
-trim_fraction = 0.10
-overwrite_existing = True
-strict_validation = True
+# 直接执行 Experiment 下的脚本时，Python 默认只把 Experiment 放入搜索路径。
+# 显式加入仓库根目录后，可以复用模型侧唯一的六边形坐标定义，避免两边各维护
+# 一套坐标公式而逐渐产生偏差。
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from model.hydro.geometry import build_hex_coordinates, parse_layout
+
+
+# 所有命令行参数的默认值集中硬编码在代码开头。需要临时处理其他数据时，可以
+# 使用命令行覆盖；需要长期调整默认行为时，只修改这里即可。
+DEFAULT_INPUT_PATH = REPO_ROOT / "filtered_data"
+DEFAULT_OUTPUT_DIRECTORY = SCRIPT_DIR /"output"
+DEFAULT_SUMMARIZED_PATH = DEFAULT_OUTPUT_DIRECTORY / "summarized_data.csv"
+DEFAULT_DATASET_PATH = DEFAULT_OUTPUT_DIRECTORY / "dataset.jsonl"
+DEFAULT_LAYOUT_PATH = SCRIPT_DIR / "input.csv"
+DEFAULT_TRIM_FRACTION = 0.10
+DEFAULT_OVERWRITE_EXISTING = True
+DEFAULT_STRICT_VALIDATION = True
+DATASET_SCHEMA_VERSION = 1
 
 # sensor 编号与实验流速的固定对应关系，单位为 m/s。
 FLOW_SPEED_BY_SENSOR: dict[int, float] = {1: 0.1, 2: 0.2, 3: 0.3, 4: 0.4}
 SENSOR_COLUMNS = ("TX", "TY", "TZ", "FX", "FY", "FZ")
 OUTPUT_COLUMNS = (
+    "sample_id",
     "model_id",
     "angle",
-    "state",
     "vegetation_layout",
     "TX",
     "TY",
@@ -56,7 +72,6 @@ OUTPUT_COLUMNS = (
     "flow_speed",
 )
 VALID_ANGLES = (0, 60, 120, 180, 240, 300)
-STATE_BY_ANGLE = {0: 1, 60: 2, 120: 1, 180: 2, 240: 1, 300: 2}
 EXPECTED_MODEL_IDS = tuple(range(1, 15))
 EXPECTED_MISSING_CONDITIONS = ((3, 60, 0.2), (3, 240, 0.3), (9, 240, 0.1), (13, 240, 0.3))
 MODEL_DIRECTORY_PATTERN = re.compile(r"^model_(?P<model_id>\d+)$", re.IGNORECASE)
@@ -179,9 +194,20 @@ def load_rotated_layouts(input_csv: Path) -> dict[tuple[int, int], str]:
         rotations = rotation_function(base_layout)
         if len(rotations) != len(VALID_ANGLES):
             raise ValueError(f"model_{model_id} 的旋转函数未返回六个方向。")
+        serialized_rotations: list[str] = []
         for angle, layout in zip(VALID_ANGLES, rotations):
             parsed_layout = _parse_layout([str(value) for value in layout], model_id)
-            rotated_layouts[(model_id, angle)] = "".join(str(value) for value in parsed_layout)
+            serialized_layout = "".join(str(value) for value in parsed_layout)
+            rotated_layouts[(model_id, angle)] = serialized_layout
+            serialized_rotations.append(serialized_layout)
+
+        # 当前实验要求一个 model 的六个角度分别保存旋转后的排布。若六次旋转中
+        # 出现重复，通常意味着输入构型具有旋转对称性，无法满足“不同角度使用不同
+        # 01 序列”的数据契约，因此在汇总阶段直接拒绝，而不是静默写入相同排布。
+        if len(set(serialized_rotations)) != len(VALID_ANGLES):
+            raise ValueError(
+                f"model_{model_id} 的六个旋转角度没有产生六个不同的 37 位排布。"
+            )
     return rotated_layouts
 
 
@@ -217,8 +243,93 @@ def _validate_strict_baseline(rows: Sequence[dict[str, object]]) -> None:
         )
 
 
-def write_dataset_csv(rows: Sequence[dict[str, object]], output_file: Path, overwrite: bool) -> None:
-    """带表头原子写入单一总 CSV，避免写入中断时破坏已有数据集。"""
+def build_sample_id(model_id: int, angle: int, flow_speed: float) -> str:
+    """构造不依赖行号的稳定 sample 标识。
+
+    参数：
+        model_id: 实验构型编号。
+        angle: 当前实验原始旋转角度，单位为 degree。
+        flow_speed: 当前实验流速，单位为 m/s。
+
+    返回值：
+        例如 ``model_001_angle_060_flow_0.2`` 的唯一字符串。即使以后 CSV 增删
+        其他 sample，这个标识也不会因为行号变化而改变。
+    """
+
+    return f"model_{model_id:03d}_angle_{angle:03d}_flow_{flow_speed:.1f}"
+
+
+def build_dataset_records(
+    rows: Sequence[dict[str, object]],
+) -> list[dict[str, object]]:
+    """把 sample 汇总行转换为带逐株坐标和角度的 JSONL 记录。
+
+    参数：
+        rows: 已经完成排序和实验完整性校验的汇总行。
+
+    返回值：
+        与 ``rows`` 一一对应的字典列表；每个字典的 ``plants`` 是变长数组，
+        每一项保存 ``plant_index、grid_index、x、y、angle``。
+    """
+
+    all_coordinates = build_hex_coordinates()
+    records: list[dict[str, object]] = []
+    seen_sample_ids: set[str] = set()
+
+    for row_number, row in enumerate(rows, start=1):
+        sample_id = str(row["sample_id"])
+        if sample_id in seen_sample_ids:
+            raise ValueError(f"第 {row_number} 条汇总记录包含重复 sample_id：{sample_id}")
+        seen_sample_ids.add(sample_id)
+
+        model_id = int(row["model_id"])
+        angle = int(row["angle"])
+        layout = str(row["vegetation_layout"])
+        parsed_layout = parse_layout(layout)
+
+        # grid_index 使用完整 37 点网格中的固定编号；plant_index 只在当前 sample
+        # 内从 0 连续编号。两者同时保存可以兼顾模型顺序和实验位置追溯。
+        plants: list[dict[str, object]] = []
+        for grid_index, occupied in enumerate(parsed_layout):
+            if not occupied:
+                continue
+            x_coordinate, y_coordinate = all_coordinates[grid_index]
+            plants.append(
+                {
+                    "plant_index": len(plants),
+                    "grid_index": grid_index,
+                    "x": float(x_coordinate),
+                    "y": float(y_coordinate),
+                    # 当前实验中，同一 sample 内所有水草都采用该 sample 的原始角度。
+                    "angle": angle,
+                }
+            )
+        if not plants:
+            raise ValueError(f"sample {sample_id} 的 vegetation_layout 中没有水草。")
+
+        records.append(
+            {
+                "schema_version": DATASET_SCHEMA_VERSION,
+                "sample_id": sample_id,
+                "model_id": model_id,
+                "angle": angle,
+                "flow_speed": float(row["flow_speed"]),
+                # 仍以字符串保存 37 位 01 序列，避免前导 0 丢失或超过浮点有效位数。
+                "vegetation_layout": layout,
+                "plants": plants,
+                "measurements": {
+                    column: float(row[column])
+                    for column in ("TX", "TY", "TZ", "FX_0", "FY_0", "FZ")
+                },
+            }
+        )
+    return records
+
+
+def write_summarized_csv(
+    rows: Sequence[dict[str, object]], output_file: Path, overwrite: bool
+) -> None:
+    """带表头原子写入 sample 级汇总 CSV。"""
 
     if output_file.exists() and not overwrite:
         raise FileExistsError(f"输出已存在；使用 --overwrite 可覆盖：{output_file}")
@@ -232,18 +343,44 @@ def write_dataset_csv(rows: Sequence[dict[str, object]], output_file: Path, over
     temporary_file.replace(output_file)
 
 
+def write_dataset_jsonl(
+    records: Sequence[dict[str, object]], output_file: Path, overwrite: bool
+) -> None:
+    """以 UTF-8 JSONL 格式原子写入模型数据文件。
+
+    参数：
+        records: 一行一个 sample 的完整 JSON 可序列化记录。
+        output_file: ``dataset.jsonl`` 的输出路径。
+        overwrite: 为 ``False`` 且目标已存在时拒绝覆盖。
+    """
+
+    if output_file.exists() and not overwrite:
+        raise FileExistsError(f"输出已存在；使用 --overwrite 可覆盖：{output_file}")
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    temporary_file = output_file.with_suffix(output_file.suffix + ".tmp")
+    with temporary_file.open("w", encoding="utf-8", newline="\n") as handle:
+        for record in records:
+            # separators 去除无意义空格，使一条 sample 严格占据一个物理文本行。
+            handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+            handle.write("\n")
+    temporary_file.replace(output_file)
+
+
 def summarize_sensor_tree(
     input_root: Path,
     output_file: Path,
+    dataset_file: Path,
     input_csv: Path,
     fraction: float,
     overwrite: bool,
     strict: bool,
 ) -> list[dict[str, object]]:
-    """汇总完整模型目录树，并返回已写入单一 CSV 的 sample 行。"""
+    """汇总完整模型目录树，并同时写出 CSV 与 JSONL。"""
 
     if not 0 <= fraction < 0.5:
         raise ValueError("trim_fraction 必须满足 0 <= fraction < 0.5。")
+    if output_file.resolve() == dataset_file.resolve():
+        raise ValueError("summarized CSV 与 dataset JSONL 不能使用同一个输出路径。")
     files = discover_sensor_files(input_root, output_file)
     if not files:
         raise FileNotFoundError(f"没有找到符合 sensor_A_angB 规则的 CSV：{input_root}")
@@ -283,10 +420,11 @@ def summarize_sensor_tree(
             print(f"[失败] model_{model_id}/ang{angle} 没有对应构型；已跳过该工况。")
             continue
         for sensor_number, means in sorted(sensor_rows.items()):
+            flow_speed = FLOW_SPEED_BY_SENSOR[sensor_number]
             row = {
+                "sample_id": build_sample_id(model_id, angle, flow_speed),
                 "model_id": model_id,
                 "angle": angle,
-                "state": STATE_BY_ANGLE[angle],
                 "vegetation_layout": layout,
                 "TX": float(means[0]),
                 "TY": float(means[1]),
@@ -294,9 +432,20 @@ def summarize_sensor_tree(
                 "FX_0": float(means[3]),
                 "FY_0": float(means[4]),
                 "FZ": float(means[5]),
-                "flow_speed": FLOW_SPEED_BY_SENSOR[sensor_number],
+                "flow_speed": flow_speed,
             }
-            if not all(np.isfinite(float(row[column])) for column in OUTPUT_COLUMNS if column != "vegetation_layout"):
+            numeric_columns = (
+                "model_id",
+                "angle",
+                "TX",
+                "TY",
+                "TZ",
+                "FX_0",
+                "FY_0",
+                "FZ",
+                "flow_speed",
+            )
+            if not all(np.isfinite(float(row[column])) for column in numeric_columns):
                 raise ValueError(f"model_{model_id}/ang{angle} 产生了非有限数值。")
             rows.append(row)
     rows.sort(key=lambda row: (int(row["model_id"]), int(row["angle"]), float(row["flow_speed"])))
@@ -304,20 +453,74 @@ def summarize_sensor_tree(
         raise ValueError("没有可写入的有效 sample。")
     if strict:
         _validate_strict_baseline(rows)
-    write_dataset_csv(rows, output_file, overwrite)
+
+    # 禁止覆盖时必须在写第一个文件之前同时检查两个目标，避免只写出其中一份。
+    if not overwrite:
+        existing_outputs = [
+            path for path in (output_file, dataset_file) if path.exists()
+        ]
+        if existing_outputs:
+            raise FileExistsError(
+                "输出已存在；使用 --overwrite 可覆盖："
+                + "、".join(str(path) for path in existing_outputs)
+            )
+
+    # 在落盘之前构建并完整验证 JSONL 记录。这样任何逐株坐标或排布错误都会在
+    # 两个正式文件被替换前暴露，不会写出一份新 CSV 配一份旧 JSONL。
+    dataset_records = build_dataset_records(rows)
+    if len(dataset_records) != len(rows):
+        raise AssertionError("JSONL sample 数量与 summarized CSV 行数不一致。")
+    write_summarized_csv(rows, output_file, overwrite)
+    write_dataset_jsonl(dataset_records, dataset_file, overwrite)
     return rows
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """创建命令行参数解析器。"""
+    """创建命令行参数解析器，默认值均来自代码开头的常量。"""
 
-    parser = argparse.ArgumentParser(description="将 sensor CSV 汇总为单一模型就绪 CSV。")
-    parser.add_argument("--input-path", type=Path, default=inputpath, help="包含 model_N 子目录的输入根目录。")
-    parser.add_argument("--output-path", type=Path, default=outputpath, help="带表头总 CSV 的输出路径。")
-    parser.add_argument("--input-csv", type=Path, default=layoutpath, help="Experiment/input.csv 构型路径。")
-    parser.add_argument("--trim-fraction", type=float, default=trim_fraction, help="每端截尾比例，默认 0.10。")
-    parser.add_argument("--overwrite", action=argparse.BooleanOptionalAction, default=overwrite_existing, help="是否允许覆盖输出 CSV。")
-    parser.add_argument("--strict", action=argparse.BooleanOptionalAction, default=strict_validation, help="是否验证当前 332 行正式实验基线。")
+    parser = argparse.ArgumentParser(description="将 sensor CSV 汇总为 CSV 和 JSONL。")
+    parser.add_argument(
+        "--input-path",
+        type=Path,
+        default=DEFAULT_INPUT_PATH,
+        help="包含 model_N 子目录的输入根目录。",
+    )
+    parser.add_argument(
+        "--output-path",
+        type=Path,
+        default=DEFAULT_SUMMARIZED_PATH,
+        help="sample 级 summarized_data.csv 输出路径。",
+    )
+    parser.add_argument(
+        "--dataset-path",
+        type=Path,
+        default=DEFAULT_DATASET_PATH,
+        help="带逐株 x、y、angle 的 dataset.jsonl 输出路径。",
+    )
+    parser.add_argument(
+        "--input-csv",
+        type=Path,
+        default=DEFAULT_LAYOUT_PATH,
+        help="Experiment/input.csv 构型路径。",
+    )
+    parser.add_argument(
+        "--trim-fraction",
+        type=float,
+        default=DEFAULT_TRIM_FRACTION,
+        help="每端截尾比例，默认 0.10。",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_OVERWRITE_EXISTING,
+        help="是否允许覆盖两个输出文件。",
+    )
+    parser.add_argument(
+        "--strict",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_STRICT_VALIDATION,
+        help="是否验证当前 332 行正式实验基线。",
+    )
     return parser
 
 
@@ -329,6 +532,7 @@ def main() -> int:
         rows = summarize_sensor_tree(
             arguments.input_path.expanduser().resolve(),
             arguments.output_path.expanduser().resolve(),
+            arguments.dataset_path.expanduser().resolve(),
             arguments.input_csv.expanduser().resolve(),
             arguments.trim_fraction,
             arguments.overwrite,
@@ -338,7 +542,8 @@ def main() -> int:
         print(f"[失败] {error}")
         return 2
     print(f"处理结束：生成 {len(rows)} 个 sample。")
-    print(f"输出文件：{arguments.output_path.expanduser().resolve()}")
+    print(f"汇总 CSV：{arguments.output_path.expanduser().resolve()}")
+    print(f"模型 JSONL：{arguments.dataset_path.expanduser().resolve()}")
     return 0
 
 

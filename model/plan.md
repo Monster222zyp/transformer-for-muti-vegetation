@@ -75,10 +75,10 @@ c_i.
 }
 ]
 
-来流永远：
+水流从 (x+) 一侧流向 (x-) 一侧，因此速度向量永远为：
 
 [
-\mathbf U=U\hat y.
+\mathbf U=-U\hat x.
 ]
 
 因此相对位置定义必须统一：
@@ -94,8 +94,9 @@ c_i.
 
 * (i)：target plant；
 * (j)：source plant；
-* (\Delta y_{ij}<0)：(j) 在 (i) 上游；
-* (\Delta y_{ij}>0)：(j) 在 (i) 下游。
+* 水流从 (x+) 一侧流向 (x-) 一侧，速度向量沿 (-x)；
+* (\Delta x_{ij}>0)：(j) 在 (i) 上游；
+* (\Delta x_{ij}<0)：(j) 在 (i) 下游。
 
 这个符号约定要从数据处理、模型、可视化到论文始终不变。
 
@@ -1476,7 +1477,7 @@ p_j=(3,2).
 \Delta y_{ij}=-3.
 ]
 
-即：
+因为 (\Delta x_{ij}>0)，即：
 
 > j 在 i 上游。
 
@@ -1575,12 +1576,12 @@ relative_value=False
 
 # 二十八、还应该做 physics symmetry test
 
-如果横向边界条件关于 (x) 对称，而来流是 (+\hat y)，那么：
+如果横向边界条件关于流向轴 (x) 对称，而来流是 (-\hat x)，那么：
 
 [
 (x_i,y_i)
 \rightarrow
-(-x_i,y_i)
+(x_i,-y_i)
 ]
 
 理论上总阻力应该不变：

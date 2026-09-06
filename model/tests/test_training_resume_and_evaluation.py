@@ -58,16 +58,16 @@ class TinyHydroDataset(Dataset):
                         dtype=torch.float32,
                     ),
                     "single_drag": torch.ones(2),
-                    "plant_state": torch.full(
-                        (2,), 1 + source_index, dtype=torch.long
+                    "plant_angles": torch.full(
+                        (2,), source_index * 60, dtype=torch.long
                     ),
                     "plant_mask": torch.ones(2, dtype=torch.bool),
                     "global_features": torch.tensor([0.1 + source_index * 0.1]),
                     "target_drag": torch.tensor(target),
                     "raw_target_drag": torch.tensor(target),
+                    "sample_id": f"sample_{source_index}",
                     "model_id": source_index + 1,
-                    "state_id": 1 + source_index,
-                    "angle": 0,
+                    "angle": source_index * 60,
                     "flow_speed": 0.1 + source_index * 0.1,
                     "source_index": source_index,
                 }
@@ -473,10 +473,50 @@ def test_checkpoint_validates_complete_model_config(tmp_path: Path) -> None:
         load_checkpoint(checkpoint_path, mismatched)
 
 
-def test_checkpoint_preserves_physics_and_rejects_old_single_token_version(
+def test_legacy_v4_checkpoint_defaults_to_none_directional_attention(
     tmp_path: Path,
 ) -> None:
-    """双状态物理表必须随 checkpoint 保存，旧架构版本必须明确拒绝。"""
+    """新增方向字段前的 v4 权重可按 none 推理，但不能载入 soft/hard 模型。"""
+
+    none_model = HydroTransformer(**SMALL_MODEL_CONFIG)
+    legacy_model_config = resolved_model_config(none_model)
+    assert legacy_model_config is not None
+    for field_name in (
+        "directional_attention_mode",
+        "directional_soft_activation",
+        "directional_soft_strength",
+        "directional_tolerance",
+    ):
+        legacy_model_config.pop(field_name)
+
+    checkpoint_path = tmp_path / "legacy_v4_without_directional_attention.pt"
+    save_checkpoint(
+        checkpoint_path,
+        {
+            "checkpoint_version": CHECKPOINT_VERSION,
+            "model_state": none_model.state_dict(),
+            "model_config": legacy_model_config,
+        },
+    )
+
+    # 代码默认值是 none，因此旧 checkpoint 在没有任何语义变化时可以继续加载。
+    compatible_none_model = HydroTransformer(**SMALL_MODEL_CONFIG)
+    load_checkpoint(checkpoint_path, compatible_none_model)
+
+    # soft/hard 会改变 attention 计算，必须由新配置重新训练，不能静默恢复旧权重。
+    for directional_mode in ("soft", "hard"):
+        incompatible_model = HydroTransformer(
+            **SMALL_MODEL_CONFIG,
+            directional_attention_mode=directional_mode,
+        )
+        with pytest.raises(ValueError, match="directional_attention_mode"):
+            load_checkpoint(checkpoint_path, incompatible_model)
+
+
+def test_checkpoint_preserves_physics_and_rejects_old_state_token_version(
+    tmp_path: Path,
+) -> None:
+    """角度阻力表必须随 checkpoint 保存，旧状态 Token 架构必须明确拒绝。"""
 
     model = HydroTransformer(**SMALL_MODEL_CONFIG)
     physical_config = {
@@ -514,9 +554,9 @@ def test_checkpoint_preserves_physics_and_rejects_old_single_token_version(
     restored = load_checkpoint(checkpoint_path, model)
     assert restored["checkpoint_metadata"]["physical_config"] == physical_config
 
-    old_path = tmp_path / "old_single_token.pt"
-    save_checkpoint(old_path, {**state, "checkpoint_version": 3})
-    with pytest.raises(ValueError, match="旧版单 Token"):
+    old_path = tmp_path / "old_state_token.pt"
+    save_checkpoint(old_path, {**state, "checkpoint_version": 4})
+    with pytest.raises(ValueError, match="旧版角度状态 Token"):
         load_checkpoint(old_path, model)
 
 
@@ -540,8 +580,9 @@ def test_prediction_keeps_source_index_first_and_rounds_flow_speed() -> None:
 
     first_row = result.predictions[0]
     assert next(iter(first_row)) == "source_index"
-    assert first_row["state_id"] == 1
-    assert result.plant_coefficients[0]["state_id"] == 1
+    assert first_row["sample_id"] == "sample_0"
+    assert "state_id" not in first_row
+    assert result.plant_coefficients[0]["plant_angle"] == 0
     assert str(first_row["flow_speed"]) == "0.1"
 
 
@@ -589,13 +630,13 @@ def test_relative_config_paths_resolve_from_project_root() -> None:
 
     config = {
         "data": {
-            "csv_path": "summarized_data.csv",
+            "dataset_path": "Experiment/output/dataset.jsonl",
             "physics_config_path": "model/configs/physical.yaml",
         },
         "output": {"artifact_dir": "model/artifacts"},
     }
     _resolve_config_paths(config)
 
-    assert Path(config["data"]["csv_path"]).is_absolute()
+    assert Path(config["data"]["dataset_path"]).is_absolute()
     assert Path(config["data"]["physics_config_path"]).is_absolute()
     assert Path(config["output"]["artifact_dir"]).is_absolute()

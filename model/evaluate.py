@@ -13,7 +13,7 @@ import torch
 from model.hydro.data import HydroDataset, collate_hydro_samples
 from model.hydro.physics import load_physical_config
 from model.models import HydroTransformer
-from model.training.checkpoint import load_checkpoint
+from model.training.checkpoint import CHECKPOINT_VERSION, load_checkpoint
 from model.training.trainer import (
     GlobalFeatureScaler,
     predict_dataset,
@@ -37,7 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", required=True, help="best.pt 或 final_model.pt。")
     parser.add_argument(
         "--data",
-        help="评估 CSV；省略时使用 checkpoint 保存的原数据路径。",
+        help="评估 dataset.jsonl；省略时使用 checkpoint 保存的原数据路径。",
     )
     parser.add_argument(
         "--external-data",
@@ -141,6 +141,11 @@ def main() -> None:
     device = resolve_device(args.device)
     # 先在 CPU 读取构造模型、定位数据所需的轻量元数据。
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    if int(checkpoint.get("checkpoint_version", -1)) < CHECKPOINT_VERSION:
+        raise ValueError(
+            "checkpoint 来自旧版角度状态 Token 架构；当前模型不再把角度输入"
+            "神经网络，请使用当前代码重新训练。"
+        )
     model_config = checkpoint.get("model_config")
     if not isinstance(model_config, dict):
         raise ValueError("checkpoint 缺少 resolved model_config。")
@@ -148,7 +153,7 @@ def main() -> None:
     physical_payload = metadata.get("physical_config")
     if not isinstance(physical_payload, dict):
         raise ValueError(
-            "checkpoint 缺少双状态 physical_config；这是旧版单 Token 模型，"
+            "checkpoint 缺少按角度查询阻力所需的 physical_config；"
             "请使用当前代码重新训练。"
         )
     physical_config = load_physical_config(physical_payload)

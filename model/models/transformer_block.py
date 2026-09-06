@@ -4,7 +4,13 @@ from typing import Optional, Tuple, Union
 
 from torch import Tensor, nn
 
-from .attention import HydroMultiHeadAttention
+from .attention import (
+    DEFAULT_DIRECTIONAL_ATTENTION_MODE,
+    DEFAULT_DIRECTIONAL_SOFT_ACTIVATION,
+    DEFAULT_DIRECTIONAL_SOFT_STRENGTH,
+    DEFAULT_DIRECTIONAL_TOLERANCE,
+    HydroMultiHeadAttention,
+)
 from .conditional_norm import ConditionalLayerNorm
 
 
@@ -28,6 +34,10 @@ class HydroTransformerBlock(nn.Module):
         condition_value_on_global: bool = True,
         condition_relative_value_on_global: bool = True,
         rope_base: float = 10_000.0,
+        directional_attention_mode: str = DEFAULT_DIRECTIONAL_ATTENTION_MODE,
+        directional_soft_activation: str = DEFAULT_DIRECTIONAL_SOFT_ACTIVATION,
+        directional_soft_strength: float = DEFAULT_DIRECTIONAL_SOFT_STRENGTH,
+        directional_tolerance: float = DEFAULT_DIRECTIONAL_TOLERANCE,
     ) -> None:
         super().__init__()
         self.norm1 = ConditionalLayerNorm(
@@ -44,6 +54,10 @@ class HydroTransformerBlock(nn.Module):
             condition_value_on_global=condition_value_on_global,
             condition_relative_value_on_global=condition_relative_value_on_global,
             rope_base=rope_base,
+            directional_attention_mode=directional_attention_mode,
+            directional_soft_activation=directional_soft_activation,
+            directional_soft_strength=directional_soft_strength,
+            directional_tolerance=directional_tolerance,
         )
         self.norm2 = ConditionalLayerNorm(
             d_model, condition_dim, enabled=use_conditional_layernorm
@@ -90,4 +104,3 @@ class HydroTransformerBlock(nn.Module):
         if return_attention:
             return hidden_states, attention_weights
         return hidden_states
-

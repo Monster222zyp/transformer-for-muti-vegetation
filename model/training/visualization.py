@@ -17,6 +17,8 @@ import matplotlib
 matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt  # noqa: E402  # 后端必须先于 pyplot 配置。
 
+from .metrics import EVALUATION_FLOW_SPEEDS, group_predictions_by_flow_speed
+
 
 def _finite_number(row: Mapping[str, Any], field: str, row_index: int) -> float:
     """读取并校验一个用于排序或绘图的有限数值。
@@ -182,4 +184,108 @@ def write_drag_comparison_plot(
     return destination
 
 
-__all__ = ["sort_drag_predictions", "write_drag_comparison_plot"]
+def _draw_drag_lines(
+    axis: Any,
+    sorted_rows: Sequence[Mapping[str, Any]],
+) -> None:
+    """在指定 matplotlib 坐标轴上绘制三条阻力折线。
+
+    参数:
+        axis: matplotlib 的 ``Axes`` 对象，负责承载当前子图。
+        sorted_rows: 已由 ``sort_drag_predictions`` 排序并校验的预测记录。
+    """
+
+    # 横坐标从 1 开始，使每个速度面板中的 sample 编号符合日常计数习惯。
+    sample_numbers = list(range(1, len(sorted_rows) + 1))
+    line_settings = {
+        "linewidth": 1.3,
+        "marker": "o",
+        "markersize": 2.4,
+    }
+    axis.plot(
+        sample_numbers,
+        [float(row["target_drag"]) for row in sorted_rows],
+        label="target_drag",
+        **line_settings,
+    )
+    axis.plot(
+        sample_numbers,
+        [float(row["predicted_drag"]) for row in sorted_rows],
+        label="predicted_drag",
+        **line_settings,
+    )
+    axis.plot(
+        sample_numbers,
+        [float(row["isolated_drag"]) for row in sorted_rows],
+        label="isolated_drag",
+        **line_settings,
+    )
+
+
+def write_drag_comparison_by_flow_speed_plot(
+    predictions: Sequence[Mapping[str, Any]],
+    output_path: str | Path,
+    *,
+    title: str = "Drag prediction comparison by flow speed",
+) -> Path:
+    """把四档流速的真实、预测和单株叠加阻力绘制为 2×2 子图。
+
+    参数:
+        predictions: ``predict_dataset`` 返回的逐样本预测记录；除总体图字段外，
+            每条记录还必须包含 ``flow_speed``。
+        output_path: PNG 输出路径；父目录不存在时会自动创建。
+        title: 整张 2×2 图的总标题。
+
+    返回:
+        已完成写入的 ``Path`` 对象。
+
+    说明:
+        每个面板内部继续按照 isolated drag、target drag、source index 排序。
+        某个 fold 缺少某档速度时仍保留对应面板，并明确显示 ``No samples``，
+        从而保证四张子图的位置始终是 0.1、0.2、0.3、0.4 m/s。
+    """
+
+    destination = Path(output_path)
+    if destination.suffix.lower() != ".png":
+        raise ValueError(f"按流速 drag 对比图必须输出为 .png 文件：{destination}")
+
+    grouped_rows = group_predictions_by_flow_speed(predictions)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    figure, axes = plt.subplots(2, 2, figsize=(16.0, 10.0))
+    try:
+        for axis, speed in zip(axes.flat, EVALUATION_FLOW_SPEEDS):
+            rows = grouped_rows[speed]
+            axis.set_title(f"{speed:.1f} m/s (n={len(rows)})")
+            axis.set_xlabel("Sorted sample index")
+            axis.set_ylabel("Drag")
+            axis.grid(True, linestyle="--", linewidth=0.6, alpha=0.45)
+
+            if rows:
+                sorted_rows = sort_drag_predictions(rows)
+                _draw_drag_lines(axis, sorted_rows)
+                axis.legend()
+            else:
+                # 空面板仍清楚表明该 fold 中没有对应速度，而不是静默漏画。
+                axis.text(
+                    0.5,
+                    0.5,
+                    "No samples",
+                    ha="center",
+                    va="center",
+                    transform=axis.transAxes,
+                )
+
+        figure.suptitle(title)
+        figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
+        figure.savefig(destination, dpi=180, format="png")
+    finally:
+        # 交叉验证会连续生成多张图，必须及时释放内存中的 Figure。
+        plt.close(figure)
+    return destination
+
+
+__all__ = [
+    "sort_drag_predictions",
+    "write_drag_comparison_by_flow_speed_plot",
+    "write_drag_comparison_plot",
+]
