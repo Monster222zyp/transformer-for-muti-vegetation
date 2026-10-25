@@ -1,8 +1,8 @@
-"""水草角度分组与物理单株基准阻力配置。
+"""单株物理默认力配置：新版按参数计算，旧版查表仅用于兼容历史 checkpoint。
 
-该模块把实验测得的单株阻力与神经网络超参数分离。训练和评估都先把 YAML
+该模块把物理计算参数与神经网络超参数分离。训练和评估都先把 YAML
 解析为不可变的 :class:`PhysicalConfig`。JSONL 不保存 state，Dataset 直接使用
-每根水草的原始角度和流速查询默认阻力；角度分组只是物理配置内部实现。
+每根水草的转盘角度和流速计算默认阻力；旧版角度分组保留历史行为。
 """
 
 from __future__ import annotations
@@ -13,6 +13,11 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import yaml
+
+from .calculated_force import (
+    SUPPORTED_CALCULATED_CONFIG_VERSIONS, CalculatedForceParameters,
+    calculated_parameters_from_mapping,
+)
 
 
 # 当前实验固定包含六个角度和四档相对流速。把协议写成常量可以在训练开始前
@@ -27,19 +32,21 @@ DEFAULT_PHYSICAL_CONFIG_PATH = (
 
 @dataclass(frozen=True)
 class PhysicalConfig:
-    """经过完整校验的双状态物理参数。
+    """经过完整校验、可保存到 checkpoint 的物理参数。
 
     属性：
-        version: 物理配置格式版本，当前必须为 ``1``。
+        version: 3 从逐株 EI 计算；2 使用全局 E；1 兼容历史物理查表。
         drag_unit: 单株阻力单位，当前必须为 ``N``，可直接与 ``FX_0`` 相乘比较。
         angles_by_state: 状态编号到角度集合的映射。
         single_drag_by_state_and_speed: 状态和流速到单株基准阻力的二维查找表。
+        calculation: 新版不可变计算参数；旧版为 None。
     """
 
     version: int
     drag_unit: str
     angles_by_state: dict[int, tuple[int, ...]]
     single_drag_by_state_and_speed: dict[int, dict[float, float]]
+    calculation: CalculatedForceParameters | None = None
 
     def state_for_angle(self, angle: int) -> int:
         """返回角度对应的状态编号。
@@ -51,7 +58,9 @@ class PhysicalConfig:
             ``1`` 或 ``2``。
         """
 
-        normalized_angle = int(angle) % 360
+        if self.version != 1:
+            raise ValueError("参数计算模式不划分状态，请使用 single_drag_for_angle。")
+        normalized_angle = float(angle) % 360
         for state_id, angles in self.angles_by_state.items():
             if normalized_angle in angles:
                 return state_id
@@ -68,6 +77,8 @@ class PhysicalConfig:
             单根水草的物理基准阻力，单位为 ``N``。
         """
 
+        if self.version != 1:
+            raise ValueError("参数计算模式不查询状态，请使用 single_drag_for_angle。")
         if state_id not in self.single_drag_by_state_and_speed:
             raise ValueError(f"未知水草状态：{state_id}")
         for configured_speed, drag in self.single_drag_by_state_and_speed[state_id].items():
@@ -77,28 +88,35 @@ class PhysicalConfig:
             f"状态 {state_id} 没有配置流速 {flow_speed:g} m/s 的单株阻力。"
         )
 
-    def single_drag_for_angle(self, angle: int, flow_speed: float) -> float:
-        """使用原始角度和流速查询单根水草默认阻力。
+    def single_drag_for_angle(
+        self, angle: float, flow_speed: float, stiffness: float | None = None,
+    ) -> float:
+        """使用转盘角度和真实流速求单根水草默认阻力。
 
         参数：
-            angle: JSONL 中逐株保存的原始角度，单位为 degree。只允许当前实验
-                六个离散角度；函数内部按 360° 归一化后匹配物理阻力组。
+            angle: JSONL 中逐株保存的转盘角度，单位 degree；计算接口支持小数。
             flow_speed: 当前 sample 流速，单位为 m/s。
+            stiffness: 逐株实测弯曲刚度 EI，单位 N·m²；version3 必填。
+                version2 提供时覆盖全局 E；version1 忽略此参数，保持旧表含义。
 
         返回值：
-            与该角度组和流速对应的单根水草默认阻力，单位为 N。
+            整株默认力，单位 N；包含三列叶片和一次圆柱力。旧版仍查询原表。
 
         注意：
-            这个函数的返回值会作为 ``single_drag`` 进入模型，但 ``angle`` 本身
-            不会传入神经网络，因此不会成为可学习特征。
+            返回值作为 ``single_drag`` 进入模型；角度另外编码为 sin/cos 全局特征，
+            stiffness 另外作为逐株输入，物理求解与神经网络使用同一份数据。
         """
 
+        if self.calculation is not None:
+            return self.calculation.single_drag_for_angle(angle, flow_speed, stiffness)
         state_id = self.state_for_angle(angle)
         return self.single_drag_for(state_id, flow_speed)
 
     def to_dict(self) -> dict[str, Any]:
         """转换为可安全写入 JSON/checkpoint 的普通字典。"""
 
+        if self.calculation is not None:
+            return self.calculation.to_dict()
         return {
             "version": self.version,
             "drag_unit": self.drag_unit,
@@ -137,12 +155,17 @@ def physical_config_from_mapping(payload: Mapping[str, Any]) -> PhysicalConfig:
         完整校验后的 :class:`PhysicalConfig`。
     """
 
-    version = int(payload.get("version", -1))
-    if version != 1:
-        raise ValueError(f"physical config version 必须为 1，实际为 {version}。")
+    version = payload.get("version")
+    if isinstance(version, bool) or version not in (1, *SUPPORTED_CALCULATED_CONFIG_VERSIONS):
+        raise ValueError(f"physical config version 必须为 1、2 或 3，实际为 {version!r}。")
     drag_unit = str(payload.get("drag_unit", "")).strip()
     if drag_unit != "N":
         raise ValueError(f"drag_unit 当前必须为 'N'，实际为 {drag_unit!r}。")
+
+    # 新训练从物理/几何参数求解；旧 checkpoint 完整保留原查表含义。
+    if version in SUPPORTED_CALCULATED_CONFIG_VERSIONS:
+        calculation = calculated_parameters_from_mapping(payload)
+        return PhysicalConfig(version, drag_unit, {}, {}, calculation)
 
     raw_states = payload.get("states")
     if not isinstance(raw_states, Mapping):

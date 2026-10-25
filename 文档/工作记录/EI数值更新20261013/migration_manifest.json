@@ -1,0 +1,70 @@
+{
+  "new_stiffness_nm2": 5.907e-06,
+  "backup": "C:\\Users\\Mayn\\Desktop\\myfiles\\Transformer project\\transformer-for-muti-vegetation\\文档\\工作记录\\EI数值更新20261013\\datasets_before_ei_5p907e_minus6.zip",
+  "backup_sha256": "89bac4a611dde13d4e8efd754912fcc73df03c392a74de158d638cd2d38df29e",
+  "files": [
+    {
+      "path": "dataset.jsonl",
+      "sample_count": 460,
+      "plant_count": 6038,
+      "old_values": [
+        1.0
+      ],
+      "before_sha256": "e8d02bead02a907fb82453961d458345d4d60d40d2d852c65bbf9e64967513a0",
+      "after_sha256": "2cf546f108e594704d03612381c430994f4d5ca03e4c7209e21f8a2e3c23939b"
+    },
+    {
+      "path": "datasets/所有.jsonl",
+      "sample_count": 460,
+      "plant_count": 6038,
+      "old_values": [
+        1.0
+      ],
+      "before_sha256": "e8d02bead02a907fb82453961d458345d4d60d40d2d852c65bbf9e64967513a0",
+      "after_sha256": "2cf546f108e594704d03612381c430994f4d5ca03e4c7209e21f8a2e3c23939b"
+    },
+    {
+      "path": "datasets/non_60.jsonl",
+      "sample_count": 160,
+      "plant_count": 3202,
+      "old_values": [
+        1.0
+      ],
+      "before_sha256": "801393c1a61b3430caa7f77694351f7d25eee6e5dc63834c752ca48cbd4f84b2",
+      "after_sha256": "7ea7720a2b01461f6ce0273b8a2f8a74b3469b9760cc67456ef88a51f67d7e53"
+    },
+    {
+      "path": "datasets/所有60度的.jsonl",
+      "sample_count": 300,
+      "plant_count": 2836,
+      "old_values": [
+        1.0
+      ],
+      "before_sha256": "e1f38f3da19110069072baa0fcc03a846ffc3b2c62c4961a3cbeb1de29d3740b",
+      "after_sha256": "ed45dbfb56d4540fb10c018643e9b74e1f3d70f0905da1ffcfc723715ebebc96"
+    },
+    {
+      "path": "datasets/新的60度的.jsonl",
+      "sample_count": 108,
+      "plant_count": 2160,
+      "old_values": [
+        1.0
+      ],
+      "before_sha256": "97eec977dbcee08754c5d06fa1c3168e0867a17055614ad6d3728a04fb98a411",
+      "after_sha256": "3395d327bae505623ef6ae686bb1357c751d3c977360c5851f89c18b2f44854d"
+    }
+  ],
+  "total_samples": 1488,
+  "total_plants": 20274,
+  "untouched_jsonl": {
+    "datasets\\archive_before_remove_01ms\\model17_60deg_two_rounds.jsonl": "44eb11a7603ba3748bd047ef2292569efc608b14092107f8c6dce75f16e2d319",
+    "Experiment\\output\\dataset.jsonl": "b2e88e31ac08f63a6b6e9099676f3c82e4082410be47ac9acf36c1284a875a77",
+    "datasets\\archive_before_remove_01ms\\all_models_all_angles_rotated.jsonl": "4f62f9e374450aceafb11967794eacb8dcd7ff73fefa63758f5356a64a411022",
+    "datasets\\archive_before_remove_01ms\\new15_17_non60deg_rotated.jsonl": "801393c1a61b3430caa7f77694351f7d25eee6e5dc63834c752ca48cbd4f84b2",
+    "datasets\\archive_before_15pct_average\\all_models_all_angles_rotated.jsonl": "04a30b6c38e9294fda8fb3a5b7c16de221fa4dda0e9385568e203bd3096dc360",
+    "datasets\\archive_before_15pct_average\\model17_60deg_two_rounds.jsonl": "721d5ad0ba0ee2dbc6e6b460a9d7af7d20de6a4635c2e7f2700f3aebb43a2bf1",
+    "visualization\\dataset_0.4.jsonl": "aca55a3aa90efd11bd58ced0b6db15222bb6ee563996faaa4a5286f5d6a71551",
+    "datasets\\archive_before_15pct_average\\new15_17_non60deg_rotated.jsonl": "962fba51a83b0a3cd711d3a2eeb9807e8bc09990ed5ad8891cb715aede4f51fa"
+  },
+  "verification_passed": true
+}

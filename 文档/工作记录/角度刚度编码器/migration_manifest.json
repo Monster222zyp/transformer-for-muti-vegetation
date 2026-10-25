@@ -1,0 +1,162 @@
+{
+  "created_at_utc": "2026-10-06T02:25:16.943199+00:00",
+  "project_root": "C:\\Users\\Mayn\\Desktop\\myfiles\\Transformer project\\transformer-for-muti-vegetation",
+  "backup_path": "C:\\Users\\Mayn\\Desktop\\myfiles\\Transformer project\\transformer-for-muti-vegetation\\文档\\工作记录\\角度刚度编码器\\dataset_before_ei_v3_20261006.zip",
+  "backup_sha256": "50223dbdfc992340f886c9979ebc10ea4a7278b25853cbd4e38ca72deef777ae",
+  "schema_version": 3,
+  "stiffness_nm2": 1.0,
+  "sample_count": 4606,
+  "plant_count": 57316,
+  "target_count": 11,
+  "targets": [
+    {
+      "path": "datasets/所有.jsonl",
+      "sample_count": 460,
+      "plant_count": 6038,
+      "old_schema_versions": [
+        2
+      ],
+      "new_schema_version": 3,
+      "before_sha256": "280a00abe137acf54278deec92fd44384cf41b1d473b5d12574f6114c3171a96",
+      "after_sha256": "e8d02bead02a907fb82453961d458345d4d60d40d2d852c65bbf9e64967513a0",
+      "deep_comparison_passed": true
+    },
+    {
+      "path": "datasets/所有60度的.jsonl",
+      "sample_count": 300,
+      "plant_count": 2836,
+      "old_schema_versions": [
+        1
+      ],
+      "new_schema_version": 3,
+      "before_sha256": "3d67de846266f62c823a96d938dc4691607b0e2a56ae1d6148714ce5639b0719",
+      "after_sha256": "e1f38f3da19110069072baa0fcc03a846ffc3b2c62c4961a3cbeb1de29d3740b",
+      "deep_comparison_passed": true
+    },
+    {
+      "path": "datasets/新的60度的.jsonl",
+      "sample_count": 108,
+      "plant_count": 2160,
+      "old_schema_versions": [
+        1
+      ],
+      "new_schema_version": 3,
+      "before_sha256": "2376a124d4e8f04fc164453c395db8c71f6f0e9bc82d771e0af694e3b0356e3d",
+      "after_sha256": "97eec977dbcee08754c5d06fa1c3168e0867a17055614ad6d3728a04fb98a411",
+      "deep_comparison_passed": true
+    },
+    {
+      "path": "datasets/新的非60度的.jsonl",
+      "sample_count": 160,
+      "plant_count": 3202,
+      "old_schema_versions": [
+        2
+      ],
+      "new_schema_version": 3,
+      "before_sha256": "13ae780d2f9d69cad0d430057ad808a7b9a08624b8ca9940dbb5cff55875c70f",
+      "after_sha256": "801393c1a61b3430caa7f77694351f7d25eee6e5dc63834c752ca48cbd4f84b2",
+      "deep_comparison_passed": true
+    },
+    {
+      "path": "datasets/archive_before_15pct_average/all_models_all_angles_rotated.jsonl",
+      "sample_count": 1096,
+      "plant_count": 13480,
+      "old_schema_versions": [
+        2
+      ],
+      "new_schema_version": 3,
+      "before_sha256": "ae5436a4c1836bdca101596ca0a18dcb00e9a2503fb04f4848d9cddff1906726",
+      "after_sha256": "04a30b6c38e9294fda8fb3a5b7c16de221fa4dda0e9385568e203bd3096dc360",
+      "deep_comparison_passed": true
+    },
+    {
+      "path": "datasets/archive_before_15pct_average/model17_60deg_two_rounds.jsonl",
+      "sample_count": 772,
+      "plant_count": 7000,
+      "old_schema_versions": [
+        1
+      ],
+      "new_schema_version": 3,
+      "before_sha256": "19d78fd697417ea744d1ef48116cd36c1c25ba8b37deb7470f26ab56ab44aa7d",
+      "after_sha256": "721d5ad0ba0ee2dbc6e6b460a9d7af7d20de6a4635c2e7f2700f3aebb43a2bf1",
+      "deep_comparison_passed": true
+    },
+    {
+      "path": "datasets/archive_before_15pct_average/new15_17_non60deg_rotated.jsonl",
+      "sample_count": 324,
+      "plant_count": 6480,
+      "old_schema_versions": [
+        2
+      ],
+      "new_schema_version": 3,
+      "before_sha256": "66a78eeb7de5f64aa09680d6a1109152c2b4c6d6038ea366fc1b338db25ef368",
+      "after_sha256": "962fba51a83b0a3cd711d3a2eeb9807e8bc09990ed5ad8891cb715aede4f51fa",
+      "deep_comparison_passed": true
+    },
+    {
+      "path": "datasets/archive_before_remove_01ms/all_models_all_angles_rotated.jsonl",
+      "sample_count": 543,
+      "plant_count": 6642,
+      "old_schema_versions": [
+        2
+      ],
+      "new_schema_version": 3,
+      "before_sha256": "dd001a1d0d7642a00bfeddcb5501432a435e3cca73dc3d757d03ef86e86c6dea",
+      "after_sha256": "4f62f9e374450aceafb11967794eacb8dcd7ff73fefa63758f5356a64a411022",
+      "deep_comparison_passed": true
+    },
+    {
+      "path": "datasets/archive_before_remove_01ms/model17_60deg_two_rounds.jsonl",
+      "sample_count": 383,
+      "plant_count": 3440,
+      "old_schema_versions": [
+        1
+      ],
+      "new_schema_version": 3,
+      "before_sha256": "4ee96733ead5401d83903ccd5a10e70038753174883b0d7bfdd8f746ae58dfc8",
+      "after_sha256": "44eb11a7603ba3748bd047ef2292569efc608b14092107f8c6dce75f16e2d319",
+      "deep_comparison_passed": true
+    },
+    {
+      "path": "datasets/archive_before_remove_01ms/new15_17_non60deg_rotated.jsonl",
+      "sample_count": 160,
+      "plant_count": 3202,
+      "old_schema_versions": [
+        2
+      ],
+      "new_schema_version": 3,
+      "before_sha256": "13ae780d2f9d69cad0d430057ad808a7b9a08624b8ca9940dbb5cff55875c70f",
+      "after_sha256": "801393c1a61b3430caa7f77694351f7d25eee6e5dc63834c752ca48cbd4f84b2",
+      "deep_comparison_passed": true
+    },
+    {
+      "path": "dataset.jsonl",
+      "sample_count": 300,
+      "plant_count": 2836,
+      "old_schema_versions": [
+        1
+      ],
+      "new_schema_version": 3,
+      "before_sha256": "3d67de846266f62c823a96d938dc4691607b0e2a56ae1d6148714ce5639b0719",
+      "after_sha256": "e1f38f3da19110069072baa0fcc03a846ffc3b2c62c4961a3cbeb1de29d3740b",
+      "deep_comparison_passed": true
+    }
+  ],
+  "excluded_files": [
+    {
+      "path": "Experiment/output/dataset.jsonl",
+      "before_sha256": "b2e88e31ac08f63a6b6e9099676f3c82e4082410be47ac9acf36c1284a875a77",
+      "after_sha256": "b2e88e31ac08f63a6b6e9099676f3c82e4082410be47ac9acf36c1284a875a77",
+      "unchanged": true
+    },
+    {
+      "path": "visualization/dataset_0.4.jsonl",
+      "before_sha256": "aca55a3aa90efd11bd58ced0b6db15222bb6ee563996faaa4a5286f5d6a71551",
+      "after_sha256": "aca55a3aa90efd11bd58ced0b6db15222bb6ee563996faaa4a5286f5d6a71551",
+      "unchanged": true
+    }
+  ],
+  "dataset_initial_exists": false,
+  "all_records_deep_comparison_passed": true,
+  "backup_original_bytes_verified": true
+}

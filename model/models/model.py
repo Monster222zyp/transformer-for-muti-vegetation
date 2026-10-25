@@ -14,6 +14,9 @@ from .attention import (
 )
 from .coefficient_head import CoefficientHead
 from .global_encoder import GlobalEncoder
+from .plant_encoder import (
+    DEFAULT_PLANT_ENCODER_HIDDEN_DIM, DEFAULT_STIFFNESS_REFERENCE_NM2, PlantEncoder,
+)
 from .transformer_block import HydroTransformerBlock
 
 
@@ -26,8 +29,10 @@ class HydroTransformerConfig:
     directional attention 字段控制下游 source 到上游 target 的消息约束。
     """
 
-    global_input_dim: int = 1
+    global_input_dim: int = 3
     global_hidden_dim: int = 64
+    plant_encoder_hidden_dim: int = DEFAULT_PLANT_ENCODER_HIDDEN_DIM
+    stiffness_reference_nm2: float = DEFAULT_STIFFNESS_REFERENCE_NM2
     d_model: int = 256
     n_heads: int = 8
     n_layers: int = 4
@@ -81,10 +86,12 @@ class HydroTransformer(nn.Module):
         if cfg.log_coefficient_min >= cfg.log_coefficient_max:
             raise ValueError("log_coefficient_min 必须小于 log_coefficient_max。")
 
-        # 所有真实水草共享同一个可学习初始 Token。角度只在 Dataset 中用于查询
-        # single_drag，不再通过状态 Embedding 间接进入神经网络。
-        self.plant_token = nn.Parameter(torch.empty(cfg.d_model))
-        nn.init.normal_(self.plant_token, mean=0.0, std=0.02)
+        if cfg.global_input_dim != 3:
+            raise ValueError("新模型 global_input_dim 必须为 3：[流速, sin角度, cos角度]。")
+        # 角度和实测 EI 通过共享 MLP 得到逐株 Token；不再复制同一个可学习向量。
+        self.plant_encoder = PlantEncoder(
+            cfg.d_model, cfg.plant_encoder_hidden_dim, cfg.stiffness_reference_nm2
+        )
         self.global_encoder = GlobalEncoder(
             cfg.global_input_dim, cfg.global_hidden_dim, cfg.d_model
         )
@@ -129,8 +136,10 @@ class HydroTransformer(nn.Module):
             raise ValueError("single_drag 必须是 [B,N]，并与 positions 对齐。")
         if plant_mask.shape != expected_plant_shape or plant_mask.dtype != torch.bool:
             raise ValueError("plant_mask 必须是与 positions 对齐的 bool 张量 [B,N]。")
-        if global_features.ndim != 2 or global_features.shape[0] != positions.shape[0]:
-            raise ValueError("global_features 必须是 [B,G]。")
+        if global_features.shape != (positions.shape[0], self.config.global_input_dim):
+            raise ValueError("global_features 必须是 [B,3]，顺序为标准化流速、sin角度、cos角度。")
+        if not torch.isfinite(global_features).all():
+            raise ValueError("global_features 必须为有限数值。")
 
         if torch.any(single_drag[plant_mask] <= 0):
             raise ValueError("有效水草的 single_drag 必须大于 0。")
@@ -144,15 +153,20 @@ class HydroTransformer(nn.Module):
         global_features: Tensor,
         plant_mask: Tensor,
         return_attention: bool = False,
+        *,
+        plant_angles: Tensor | None = None,
+        plant_stiffness: Tensor | None = None,
     ) -> Dict[str, Union[Tensor, List[Tensor]]]:
         """执行总阻力预测。
 
         参数:
             positions: ``[B,N,2]``，有效植物的二维无量纲坐标。
             single_drag: ``[B,N]``，孤立单株阻力；padding 位置应为 0。
-            global_features: ``[B,G]``，当前第一版只含标准化流速。
+            global_features: ``[B,3]``，标准化流速、共同角度的 sin 和 cos。
             plant_mask: ``[B,N]`` bool；``True`` 代表真实植物。
             return_attention: 是否额外返回每一层的 attention 权重。
+            plant_angles: ``[B,N]``，每株的转盘角（degree），作为关键词传入。
+            plant_stiffness: ``[B,N]``，每株实测 EI（N·m²），作为关键词传入。
 
         返回:
             字典包含 ``total_drag [B]``、``coefficient [B,N]`` 和
@@ -161,14 +175,14 @@ class HydroTransformer(nn.Module):
         """
 
         self._validate_inputs(positions, single_drag, global_features, plant_mask)
+        if plant_angles is None or plant_stiffness is None:
+            raise ValueError("新模型需要 plant_angles 和 plant_stiffness，不能使用旧共享 Token 输入。")
+        if plant_angles.shape != plant_mask.shape or plant_stiffness.shape != plant_mask.shape:
+            raise ValueError("plant_angles 和 plant_stiffness 必须与 positions 对齐为 [B,N]。")
         mask_as_float = plant_mask.to(dtype=positions.dtype)
 
-        # 共享 Token 扩展到 batch 中每一个水草位置；padding 随后由 mask 归零。
-        # positions、single_drag 和流速仍保留模型所需信息，但原始 angle 不在输入中。
-        hidden_states = self.plant_token.view(1, 1, -1).expand(
-            positions.shape[0], positions.shape[1], -1
-        )
-        hidden_states = hidden_states * mask_as_float.unsqueeze(-1)
+        # 起始向量直接包含每株角度和 EI；几何仍由位置注意力机制读取。
+        hidden_states = self.plant_encoder(plant_angles, plant_stiffness, plant_mask)
         condition = self.global_encoder(global_features)
 
         collected_attention: List[Tensor] = []

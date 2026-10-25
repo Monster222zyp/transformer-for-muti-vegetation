@@ -2,11 +2,11 @@
 
 运行方式（在仓库任意位置均可）：
 
-    py -3.11 interpretability/plot_plant_coefficients.py
+    python visualization/plot_plant_coefficients.py
 
 也可以显式指定另一份配置：
 
-    py -3.11 interpretability/plot_plant_coefficients.py --config path/to/config.yaml
+    python visualization/plot_plant_coefficients.py --config path/to/config.yaml
 
 脚本不会在代码中保存 checkpoint 路径、输入 sample 或绘图参数；所有可调整参数
 都位于独立的 ``config.yaml``。输入 JSONL 必须采用 Experiment 生成的
@@ -44,7 +44,7 @@ SCRIPT_DIRECTORY = Path(__file__).resolve().parent
 REPOSITORY_ROOT = SCRIPT_DIRECTORY.parent
 DEFAULT_CONFIG_PATH = SCRIPT_DIRECTORY / "config.yaml"
 
-# 从 interpretability 子目录直接执行时，Python 默认看不到仓库根目录下的 model 包。
+# 从 visualization 子目录直接执行时，Python 默认看不到仓库根目录下的 model 包。
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
@@ -370,7 +370,7 @@ def predict_all_samples(
     physical_config = load_physical_config(metadata["physical_config"])
     negative_target_policy = str(metadata.get("negative_target_policy", "clamp_to_zero"))
 
-    # HydroDataset 负责严格验证 JSONL、逐株坐标、原始角度和流速物理表，
+    # HydroDataset 负责严格验证 JSONL、逐株坐标、原始角度、实测 EI 和物理配置，
     # 因而解释脚本与训练入口共享完全相同的输入契约。
     dataset = HydroDataset(
         config.samples_dataset_path,
@@ -388,6 +388,10 @@ def predict_all_samples(
         single_drag = batch["single_drag"].to(device)
         plant_mask = batch["plant_mask"].to(device)
         global_features = scaler.transform(batch["global_features"].to(device))
+        # 当前模型从逐株角度和 EI 构造植物特征；两者均为 [B,N]，与位置及 mask 对齐。
+        # 角度单位为 degree，EI 单位为 N·m²；保留物理原值并迁移到模型所在设备。
+        plant_angles = batch["plant_angles"].to(device)
+        plant_stiffness = batch["plant_stiffness"].to(device)
 
         with torch.inference_mode():
             outputs = model(
@@ -395,6 +399,8 @@ def predict_all_samples(
                 single_drag=single_drag,
                 global_features=global_features,
                 plant_mask=plant_mask,
+                plant_angles=plant_angles,
+                plant_stiffness=plant_stiffness,
             )
 
         plant_count = int(plant_mask[0].sum().item())
@@ -726,7 +732,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--config",
         type=Path,
         default=DEFAULT_CONFIG_PATH,
-        help="独立 YAML 配置文件；默认 interpretability/config.yaml。",
+        help="独立 YAML 配置文件；默认 visualization/config.yaml。",
     )
     return parser
 
@@ -768,7 +774,7 @@ def prepare_output_directory(config: ScriptConfig, config_path: Path) -> None:
 
 
 def main() -> int:
-    """执行配置读取、CSV 推理和两类热力图输出。"""
+    """执行配置读取、JSONL 推理和两类热力图输出。"""
 
     arguments = build_argument_parser().parse_args()
     try:
@@ -784,8 +790,8 @@ def main() -> int:
             config.shared_color_scale,
         )
 
-        # 共享连续色标时先逐条扫描最大值，但不保存 332 个大网格；正式绘图时仍逐条
-        # 构建、保存并释放，峰值内存基本不随 CSV 行数增长。
+        # 共享连续色标时先逐条扫描最大值，但不同时保存所有样本的大网格；正式绘图时
+        # 仍逐条构建、保存并释放，峰值内存基本不随 JSONL 行数增长。
         shared_gaussian_upper_bound = (
             find_shared_gaussian_upper_bound(
                 predictions,

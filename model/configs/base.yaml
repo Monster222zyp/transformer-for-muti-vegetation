@@ -1,16 +1,23 @@
+# 训练运行模式：cv 保留原有自动划分；predefined 使用下面指定的三份 JSONL；
+# overfit 只做少量样本的训练诊断。命令行 --mode 可以临时覆盖此设置。
+mode: cv
+
 # 可复现随机种子：控制分组划分、模型初始化和 DataLoader 洗牌。
-seed: 20260816
+seed: 20261023
 
 data:
-  # Experiment 汇总脚本生成、包含逐株 x/y/angle 的模型 JSONL。
+  # Experiment 汇总脚本生成、包含逐株 x/y/angle/stiffness 的 schema3 JSONL。
   dataset_path: C:\Users\Mayn\Desktop\myfiles\Transformer project\transformer-for-muti-vegetation\dataset.jsonl
-  # 两组原始角度和“角度组 × 流速”单株实测阻力。
+  # 叶片/圆柱几何、EI单位与求解参数；按逐株转盘角、EI和真实流速计算默认力。
   physics_config_path: model/configs/physical.yaml
   # 当前把小量负阻力视为待验证的测量偏差并在训练时归零；噪声解释仍需传感器不确定度验证，原值继续写入预测表。
   negative_target_policy: clamp_to_zero
 
 model:
-  global_input_dim: 1
+  global_input_dim: 3  # 全局输入：标准化流速、sin(共同转盘角)、cos(共同转盘角)。
+  global_hidden_dim: 64  # 全局 MLP 的中间维度，输出仍为 d_model。
+  plant_encoder_hidden_dim: 128  # 逐株角度/EI 编码 MLP 的中间维度。
+  stiffness_reference_nm2: 5.907e-6  # log(EI/EI_ref) 的 EI_ref，单位 N·m²。
   d_model: 256
   n_heads: 8
   n_layers: 4
@@ -25,7 +32,7 @@ model:
   # x 越大越靠上游；水流从 x+ 一侧流向 x- 一侧。
   # soft 使用 ReLU(x_target-x_source-tolerance) 惩罚下游 source，但不完全屏蔽。
   #none soft hard 分别表示不使用、使用软屏蔽和使用硬屏蔽；hard 会直接将下游 source 的注意力权重置零。
-  directional_attention_mode: none
+  directional_attention_mode: hard
   directional_soft_activation: relu
   directional_soft_strength: 1.0
   directional_tolerance: 0.000001
@@ -40,7 +47,7 @@ training:
   batch_size: 32
   # true：每条训练样本额外生成 y→-y、angle→(-angle)%360 的镜像；false：不增强。
   # 仅影响训练，validation/test 始终使用原始样本。
-  mirror_augmentation: false
+  mirror_augmentation: true
   learning_rate: 0.0003
   weight_decay: 0.0001
   max_epochs: 500
@@ -51,20 +58,30 @@ training:
   # auto 会优先使用 CUDA；没有可用显卡时自动使用 CPU。
   device: auto
   # 每训练 1 个 epoch 向 terminal 输出一次训练集和验证集 loss。
-  progress_interval_epochs: 1
+  progress_interval_epochs: 100
   # loss_curve.png 每 1 个 epoch 取一个常规采样点。
-  loss_plot_interval_epochs: 1
+  loss_plot_interval_epochs: 100
   # 完整 last.pt 每 100 个 epoch 保存一次；最终 epoch 和 early stopping 时仍会强制保存。
   checkpoint_interval_epochs: 100
 
 cross_validation:
   # flow_speed：0.1/0.2/0.3 m/s 训练，完整 0.4 m/s 同时用于 validation/test。
   # 还可选 sample、model、plant_count；只有这三个普通模式使用下面的折数和验证比例。
-  split_mode: plant_count
+  split_mode: sample
   # flow_speed 固定只生成 fold_0，因此会忽略 n_splits。
   n_splits: 5
   # flow_speed 会忽略此值；普通模式从每个 outer-train 抽取约 20% 作为验证集合。
   validation_fraction: 0.2
 
+# 仅在 mode: predefined 时使用。每份 JSONL 必须与 data.dataset_path 具有相同格式。
+# 改用此模式时填写三个路径，例如 data/train.jsonl；相对路径以项目根目录为基准。
+# null 表示未设置，训练会在清理旧产物前给出缺少路径的错误。
+predefined_split:
+  train_dataset_path: null
+  validation_dataset_path: null
+  test_dataset_path: null
+
 output:
   artifact_dir: model/artifacts
+  # independent：每张图独立取范围；shared：两图共用范围。图内 x、y 始终等比例。
+  drag_parity_axis_mode: independent

@@ -7,6 +7,7 @@ from .attention import (
 )
 from .conditional_norm import ConditionalLayerNorm, FeatureWiseLinearModulation
 from .global_encoder import GlobalEncoder
+from .plant_encoder import PlantEncoder
 from .model import HydroTransformer, HydroTransformerConfig
 from .relative_geometry import RelativeGeometryEncoder, compute_relative_positions
 from .rope_2d import RotaryPositionEmbedding2D
@@ -16,6 +17,7 @@ __all__ = [
     "ConditionalLayerNorm",
     "FeatureWiseLinearModulation",
     "GlobalEncoder",
+    "PlantEncoder",
     "HydroMultiHeadAttention",
     "HydroTransformer",
     "HydroTransformerBlock",

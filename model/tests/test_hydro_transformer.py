@@ -37,12 +37,25 @@ def _make_batch(batch_size: int = 2, plant_count: int = 4):
     torch.manual_seed(7)
     positions = torch.randn(batch_size, plant_count, 2)
     single_drag = torch.rand(batch_size, plant_count) + 0.2
-    global_features = torch.rand(batch_size, 1)
+    global_features = torch.cat(
+        (torch.rand(batch_size, 1), torch.zeros(batch_size, 1), torch.ones(batch_size, 1)), dim=1
+    )
     plant_mask = torch.ones(batch_size, plant_count, dtype=torch.bool)
     if batch_size > 1:
         plant_mask[1, -1] = False
         single_drag[1, -1] = 0.0
     return positions, single_drag, global_features, plant_mask
+
+
+def _physical_forward(model, positions, single_drag, global_features, plant_mask, **kwargs):
+    """给原几何测试补齐同向、同刚度的逐株特征，保持其原来的检验目标。"""
+
+    return model(
+        positions, single_drag, global_features, plant_mask,
+        plant_angles=torch.zeros_like(single_drag),
+        plant_stiffness=plant_mask.to(single_drag.dtype),
+        **kwargs,
+    )
 
 
 def _make_coefficients_nontrivial(model: HydroTransformer) -> None:
@@ -69,7 +82,7 @@ def test_forward_shapes_and_attention_shapes():
 
     model = _small_model().eval()
     batch = _make_batch()
-    outputs = model(*batch, return_attention=True)
+    outputs = _physical_forward(model, *batch, return_attention=True)
 
     assert outputs["total_drag"].shape == (2,)
     assert outputs["coefficient"].shape == (2, 4)
@@ -89,7 +102,7 @@ def test_rope_dimension_constraint_only_applies_when_enabled():
         use_rope=False,
     ).eval()
     positions, single_drag, global_features, plant_mask = _make_batch(batch_size=1)
-    outputs = model(positions, single_drag, global_features, plant_mask)
+    outputs = _physical_forward(model, positions, single_drag, global_features, plant_mask)
     assert torch.isfinite(outputs["total_drag"]).all()
 
     # 同一维度组合一旦启用 RoPE，就应尽早给出清晰的配置错误。
@@ -266,8 +279,8 @@ def test_zero_strength_soft_attention_is_exactly_none():
     ).eval()
     batch = _make_batch(batch_size=1)
 
-    none_output = none_model(*batch, return_attention=True)
-    soft_output = zero_soft_model(*batch, return_attention=True)
+    none_output = _physical_forward(none_model, *batch, return_attention=True)
+    soft_output = _physical_forward(zero_soft_model, *batch, return_attention=True)
     for name in ("total_drag", "coefficient", "log_coefficient"):
         torch.testing.assert_close(soft_output[name], none_output[name], atol=0.0, rtol=0.0)
     for soft_attention, none_attention in zip(
@@ -326,10 +339,11 @@ def test_permutation_equivariance_and_total_drag_invariance(
     model = _small_model(directional_attention_mode=directional_attention_mode).eval()
     _make_coefficients_nontrivial(model)
     positions, single_drag, global_features, plant_mask = _make_batch(batch_size=1)
-    original = model(positions, single_drag, global_features, plant_mask)
+    original = _physical_forward(model, positions, single_drag, global_features, plant_mask)
 
     permutation = torch.tensor([2, 0, 3, 1])
-    permuted = model(
+    permuted = _physical_forward(
+        model,
         positions[:, permutation],
         single_drag[:, permutation],
         global_features,
@@ -349,12 +363,12 @@ def test_padding_invariance(directional_attention_mode: str):
     model = _small_model(directional_attention_mode=directional_attention_mode).eval()
     _make_coefficients_nontrivial(model)
     positions, single_drag, global_features, plant_mask = _make_batch(batch_size=1, plant_count=3)
-    original = model(positions, single_drag, global_features, plant_mask)
+    original = _physical_forward(model, positions, single_drag, global_features, plant_mask)
 
     padded_positions = torch.cat((positions, torch.randn(1, 5, 2)), dim=1)
     padded_drag = torch.cat((single_drag, torch.zeros(1, 5)), dim=1)
     padded_mask = torch.cat((plant_mask, torch.zeros(1, 5, dtype=torch.bool)), dim=1)
-    padded = model(padded_positions, padded_drag, global_features, padded_mask)
+    padded = _physical_forward(model, padded_positions, padded_drag, global_features, padded_mask)
 
     torch.testing.assert_close(padded["total_drag"], original["total_drag"], atol=1e-5, rtol=1e-5)
     torch.testing.assert_close(
@@ -367,10 +381,11 @@ def test_single_plant_physics_informed_initialization():
     """系数头初始为 c=1，因此单株总阻力应精确等于孤立阻力。"""
 
     model = _small_model().eval()
-    outputs = model(
+    outputs = _physical_forward(
+        model,
         positions=torch.tensor([[[0.0, 0.0]]]),
         single_drag=torch.tensor([[2.75]]),
-        global_features=torch.tensor([[0.2]]),
+        global_features=torch.tensor([[0.2, 0.0, 1.0]]),
         plant_mask=torch.tensor([[True]]),
     )
 
@@ -419,10 +434,11 @@ def test_all_padding_is_finite_and_returns_zero(directional_attention_mode: str)
     """没有有效植物的 batch 不应产生 NaN，总阻力和系数应为零。"""
 
     model = _small_model(directional_attention_mode=directional_attention_mode).eval()
-    outputs = model(
+    outputs = _physical_forward(
+        model,
         positions=torch.randn(2, 4, 2),
         single_drag=torch.zeros(2, 4),
-        global_features=torch.randn(2, 1),
+        global_features=torch.randn(2, 3),
         plant_mask=torch.zeros(2, 4, dtype=torch.bool),
         return_attention=True,
     )
@@ -441,7 +457,7 @@ def test_forward_backward_has_no_nan(directional_attention_mode: str):
 
     model = _small_model(directional_attention_mode=directional_attention_mode).train()
     positions, single_drag, global_features, plant_mask = _make_batch()
-    outputs = model(positions, single_drag, global_features, plant_mask)
+    outputs = _physical_forward(model, positions, single_drag, global_features, plant_mask)
     target = torch.tensor([2.0, 1.5])
     loss = torch.nn.functional.mse_loss(outputs["total_drag"], target)
     loss.backward()
@@ -453,8 +469,8 @@ def test_forward_backward_has_no_nan(directional_attention_mode: str):
     assert all(torch.isfinite(gradient).all() for gradient in gradients)
 
 
-def test_all_plants_share_one_trainable_token():
-    """模型只包含一个共享 Token，角度状态不能再成为神经网络输入。"""
+def test_all_plants_use_one_trainable_physical_encoder():
+    """相同物理输入得到相同 embedding，共享编码器参数能够得到梯度。"""
 
     model = _small_model().train()
     _make_coefficients_nontrivial(model)
@@ -465,24 +481,28 @@ def test_all_plants_share_one_trainable_token():
         ]
     )
     single_drag = torch.ones(2, 2)
-    global_features = torch.zeros(2, 1)
+    global_features = torch.tensor([[0.2, 0.0, 1.0], [0.2, 0.0, 1.0]])
     plant_mask = torch.ones(2, 2, dtype=torch.bool)
-    assert model.plant_token.shape == (model.config.d_model,)
-    outputs = model(positions, single_drag, global_features, plant_mask)
+    assert not hasattr(model, "plant_token")
+    outputs = _physical_forward(model, positions, single_drag, global_features, plant_mask)
     torch.testing.assert_close(outputs["total_drag"][0], outputs["total_drag"][1])
     outputs["total_drag"].sum().backward()
-    assert model.plant_token.grad is not None
-    assert torch.count_nonzero(model.plant_token.grad) > 0
+    gradients = [parameter.grad for parameter in model.plant_encoder.parameters()]
+    assert all(gradient is not None for gradient in gradients)
+    assert any(torch.count_nonzero(gradient) > 0 for gradient in gradients)
 
 
-def test_forward_signature_does_not_accept_angle_or_state():
-    """神经网络 forward 不应接收任何原始角度或派生状态参数。"""
+def test_forward_requires_physical_features_and_rejects_old_discrete_state():
+    """新模型必须显式提供逐株角度和 EI，旧离散状态参数仍然不合法。"""
 
     model = _small_model().eval()
     positions = torch.zeros(1, 2, 2)
     single_drag = torch.tensor([[1.0, 0.0]])
-    global_features = torch.zeros(1, 1)
+    global_features = torch.tensor([[0.2, 0.0, 1.0]])
     plant_mask = torch.tensor([[True, False]])
+
+    with pytest.raises(ValueError, match="plant_angles.*plant_stiffness"):
+        model(positions, single_drag, global_features, plant_mask)
 
     with pytest.raises(TypeError):
         model(

@@ -1,14 +1,19 @@
 """HydroTransformer 训练命令行入口。
 
 示例：
+    # 无参数时读取 model/configs/base.yaml 的 mode 和数据路径。
+    python -m model.train
     python -m model.train --mode cv
     python -m model.train --mode overfit --max-epochs 300
+    python -m model.train --mode predefined --train-data train.jsonl \
+        --validation-data validation.jsonl --test-data test.jsonl
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import statistics
 from pathlib import Path
@@ -16,6 +21,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from torch.utils.data import ConcatDataset, Dataset
 
 from model.hydro.data import HydroDataset, collate_hydro_samples
 from model.hydro.physics import load_physical_config
@@ -24,7 +30,12 @@ from model.training.artifacts import (
     prepare_fresh_artifact_directory,
     prepare_resume_artifact_directory,
 )
-from model.training.config import load_config, save_config_snapshot
+from model.training.config import (
+    DEFAULT_DRAG_PARITY_AXIS_MODE,
+    DRAG_PARITY_AXIS_MODES,
+    load_config,
+    save_config_snapshot,
+)
 from model.training.losses import (
     DEFAULT_RELATIVE_FLOOR_QUANTILE,
     RELATIVE_FLOOR_STRATEGY,
@@ -52,6 +63,7 @@ from model.training.trainer import (
 from model.training.visualization import (
     write_drag_comparison_by_flow_speed_plot,
     write_drag_comparison_plot,
+    write_drag_parity_plots,
 )
 
 
@@ -59,6 +71,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "model" / "configs" / "base.yaml"
 DEFAULT_MANAGED_ARTIFACT_ROOT = PROJECT_ROOT / "model" / "artifacts"
 """允许 fresh run 自动清理的项目默认产物根目录。"""
+
+PREDEFINED_SPLIT_MODE = "predefined"
+"""用户显式提供 train/validation/test 三份 JSONL 时使用的划分模式名。"""
 
 MODEL_SOURCE_ROOT = PROJECT_ROOT / "model"
 """训练源码目录；任何自动清理目标都不能等于或包含该目录。"""
@@ -78,23 +93,47 @@ FLOW_SPEED_METRIC_COLUMNS = (
 """按流速输出 CSV 时使用的固定列顺序。"""
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """定义并解析训练命令行参数。"""
 
     parser = argparse.ArgumentParser(description="训练多水草 HydroTransformer。")
     parser.add_argument(
         "--mode",
-        choices=("cv", "overfit"),
-        default="cv",
+        choices=("cv", "overfit", PREDEFINED_SPLIT_MODE),
+        default=None,
         help=(
-            "cv 按配置执行数据划分与评估；flow_speed 固定运行一折且不全量重训，"
-            "其他模式执行多折评估和全量重训。overfit 仅检查前32条样本。"
+            "省略时使用 YAML 的 mode；cv 按配置执行数据划分与评估；"
+            "flow_speed 固定运行一折且不全量重训，"
+            "其他模式执行多折评估和全量重训。overfit 仅检查前32条样本；"
+            "predefined 使用用户显式提供的 train/validation/test 三份 JSONL，"
+            "只训练一个模型且不执行 final 重训。"
         ),
     )
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="YAML 配置。")
     parser.add_argument("--data", help="覆盖配置中的 dataset.jsonl 路径。")
+    parser.add_argument(
+        "--train-data",
+        default=None,
+        help="predefined 模式的训练集 JSONL。",
+    )
+    parser.add_argument(
+        "--validation-data",
+        default=None,
+        help="predefined 模式的验证集 JSONL。",
+    )
+    parser.add_argument(
+        "--test-data",
+        default=None,
+        help="predefined 模式的测试集 JSONL。",
+    )
     parser.add_argument("--physics-config", help="覆盖角度阻力分组 YAML 路径。")
     parser.add_argument("--artifact-dir", help="覆盖产物目录。")
+    parser.add_argument(
+        "--drag-parity-axis-mode",
+        choices=DRAG_PARITY_AXIS_MODES,
+        default=None,
+        help="覆盖散点图范围模式：independent 各图独立取范围，shared 两图共用范围。",
+    )
     parser.add_argument("--device", help="auto、cpu 或 cuda。")
     parser.add_argument("--batch-size", type=int, help="覆盖 batch size。")
     parser.add_argument("--max-epochs", type=int, help="覆盖最大 epoch。")
@@ -103,7 +142,65 @@ def parse_args() -> argparse.Namespace:
         "--resume-checkpoint",
         help="仅 overfit 模式使用，从 last.pt 或同结构 checkpoint 恢复。",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
+
+
+def _validate_mode_arguments(
+    args: argparse.Namespace, config: dict[str, Any] | None = None
+) -> None:
+    """合并 YAML/CLI 的运行模式和数据路径，再验证组合是否有效。
+
+    ``predefined`` 要求 train、validation、test 三份 JSONL 全部存在于 YAML
+    或命令行中；命令行覆盖 YAML。若 CLI 未指定 mode，则以 YAML 的 mode 为准。
+    其他模式继续只使用单一 ``--data``。显式三分集目前不支持断点续训，避免把
+    checkpoint 的单数据集恢复语义误用于三个独立文件。
+    """
+
+    configured = config or {}
+    args.mode = args.mode or configured.get("mode", "cv")
+    if args.mode not in ("cv", "overfit", PREDEFINED_SPLIT_MODE):
+        raise ValueError(f"未知训练 mode：{args.mode!r}。")
+
+    # 只把命令行显式传入的三路径视为其他模式的非法参数。YAML 可以预存
+    # predefined 路径而继续运行 cv，便于维护者在两种实验协议间切换。
+    predefined_values = {
+        "--train-data": getattr(args, "train_data", None),
+        "--validation-data": getattr(args, "validation_data", None),
+        "--test-data": getattr(args, "test_data", None),
+    }
+    supplied_predefined = [name for name, value in predefined_values.items() if value]
+
+    if args.mode == PREDEFINED_SPLIT_MODE:
+        split_config = configured.get("predefined_split") or {}
+        args.train_data = args.train_data or split_config.get("train_dataset_path")
+        args.validation_data = args.validation_data or split_config.get(
+            "validation_dataset_path"
+        )
+        args.test_data = args.test_data or split_config.get("test_dataset_path")
+        predefined_values = {
+            "--train-data": args.train_data,
+            "--validation-data": args.validation_data,
+            "--test-data": args.test_data,
+        }
+        missing = [name for name, value in predefined_values.items() if not value]
+        if missing:
+            raise ValueError(
+                "predefined 模式必须同时提供 --train-data、--validation-data 和 "
+                f"--test-data；当前缺少：{', '.join(missing)}。"
+            )
+        if getattr(args, "data", None):
+            raise ValueError("predefined 模式不能同时使用 --data。")
+        if args.resume_checkpoint:
+            raise ValueError("--resume-checkpoint 目前仅用于 overfit 模式。")
+        return
+
+    if supplied_predefined:
+        raise ValueError(
+            f"{args.mode} 模式不能使用预定义三数据集参数："
+            f"{', '.join(supplied_predefined)}。"
+        )
+    if args.mode == "cv" and args.resume_checkpoint:
+        raise ValueError("--resume-checkpoint 目前仅用于 overfit 模式。")
 
 
 def _apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> None:
@@ -117,6 +214,11 @@ def _apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> No
         )
     if args.artifact_dir:
         config["output"]["artifact_dir"] = str(Path(args.artifact_dir).resolve())
+    # 绘图参数写回配置，确保训练配置快照记录最终生效的坐标模式。
+    # 兼容外部脚本或旧测试手动构造、尚未包含新增字段的 Namespace。
+    parity_axis_mode = getattr(args, "drag_parity_axis_mode", None)
+    if parity_axis_mode is not None:
+        config["output"]["drag_parity_axis_mode"] = parity_axis_mode
     if args.device:
         config["training"]["device"] = args.device
     if args.batch_size is not None:
@@ -125,6 +227,17 @@ def _apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> No
         config["training"]["max_epochs"] = args.max_epochs
     if args.seed is not None:
         config["seed"] = args.seed
+    # 把最终生效的 mode 写入快照；CLI 未指定时也明确记录从 YAML 取得的值。
+    config["mode"] = args.mode
+    if args.mode == PREDEFINED_SPLIT_MODE:
+        # YAML 路径已在 _resolve_config_paths 中按项目根目录解析；命令行显式路径
+        # 则按当前工作目录解析。最终快照和 checkpoint 都记录绝对路径。
+        config["predefined_split"] = {
+            "train_dataset_path": str(Path(args.train_data).resolve()),
+            "validation_dataset_path": str(Path(args.validation_data).resolve()),
+            "test_dataset_path": str(Path(args.test_data).resolve()),
+        }
+        config["cross_validation"]["split_mode"] = PREDEFINED_SPLIT_MODE
 
 
 def _resolve_config_paths(config: dict[str, Any]) -> None:
@@ -143,6 +256,21 @@ def _resolve_config_paths(config: dict[str, Any]) -> None:
         if not configured_path.is_absolute():
             configured_path = PROJECT_ROOT / configured_path
         config[section][key] = str(configured_path.resolve())
+
+    # 三份显式数据路径可以保持 null，直到维护者真正切换到 predefined。
+    # 非空 YAML 路径沿用其他配置路径的约定，相对于项目根目录解释。
+    split_config = config.get("predefined_split") or {}
+    for key in (
+        "train_dataset_path",
+        "validation_dataset_path",
+        "test_dataset_path",
+    ):
+        if not split_config.get(key):
+            continue
+        configured_path = Path(split_config[key])
+        if not configured_path.is_absolute():
+            configured_path = PROJECT_ROOT / configured_path
+        split_config[key] = str(configured_path.resolve())
 
 
 def _collect_split_labels(
@@ -211,6 +339,127 @@ def _prepare_cross_validation_splits(
         seed=int(config["seed"]),
     )
     return split_mode, splits
+
+
+def _sha256_file(path: Path) -> str:
+    """分块计算文件 SHA-256，避免一次把大型 JSONL 全部读入内存。
+
+    参数：
+        path: 需要形成不可变内容摘要的文件路径。
+
+    返回值：
+        64 位小写十六进制 SHA-256 字符串。
+    """
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _validate_predefined_sample_ids(
+    datasets: dict[str, HydroDataset],
+) -> None:
+    """拒绝 train、validation、test 之间重复的 ``sample_id``。
+
+    每个 :class:`HydroDataset` 已经保证单文件内部 ID 唯一；这里补充跨文件检查。
+    相同 ID 出现在多个角色中通常表示数据泄漏，即测试样本已经被训练或 early
+    stopping 间接使用。
+    """
+
+    owner_by_sample_id: dict[str, str] = {}
+    duplicates: list[str] = []
+    for role, dataset in datasets.items():
+        for index in range(len(dataset)):
+            sample_id = str(dataset[index]["sample_id"])
+            previous_role = owner_by_sample_id.get(sample_id)
+            if previous_role is not None and previous_role != role:
+                duplicates.append(f"{sample_id} ({previous_role}/{role})")
+            else:
+                owner_by_sample_id[sample_id] = role
+    if duplicates:
+        preview = "、".join(duplicates[:10])
+        suffix = "……" if len(duplicates) > 10 else ""
+        raise ValueError(
+            "预定义 train/validation/test 之间存在重复 sample_id，可能造成数据泄漏："
+            f"{preview}{suffix}"
+        )
+
+
+def _prepare_predefined_datasets(
+    config: dict[str, Any],
+    physical_config: Any,
+) -> tuple[Dataset, tuple[str, list[GroupSplit]], dict[str, HydroDataset]]:
+    """加载、校验并拼接用户指定的 train/validation/test JSONL。
+
+    三份文件分别使用严格 schema v1/v2 数据加载器。拼接只为复用训练器已经稳定
+    的 ``Dataset + indices`` 接口；每个样本的 ``source_index`` 仍表示它在所属
+    JSONL 中的本地行号，不会被伪装成跨文件全局行号。
+
+    返回值：
+        ``(combined_dataset, prepared_splits, datasets_by_role)``。其中划分只有 fold 0，
+        并严格按三个文件的边界构造，不包含随机过程。
+    """
+
+    split_config = config["predefined_split"]
+    dataset_paths = {
+        "train": Path(split_config["train_dataset_path"]),
+        "validation": Path(split_config["validation_dataset_path"]),
+        "test": Path(split_config["test_dataset_path"]),
+    }
+    datasets = {
+        role: HydroDataset(
+            path,
+            negative_target_policy=config["data"]["negative_target_policy"],
+            physical_config=physical_config,
+        )
+        for role, path in dataset_paths.items()
+    }
+    _validate_predefined_sample_ids(datasets)
+
+    train_count = len(datasets["train"])
+    validation_count = len(datasets["validation"])
+    test_count = len(datasets["test"])
+    # HydroDataset 会拒绝空 JSONL；这里保留明确的角色级错误，便于以后替换 Dataset
+    # 实现时仍维持三集合必须非空的训练契约。
+    for role, count in (
+        ("train", train_count),
+        ("validation", validation_count),
+        ("test", test_count),
+    ):
+        if count <= 0:
+            raise ValueError(f"predefined 模式的 {role} 数据集不能为空。")
+
+    validation_start = train_count
+    test_start = train_count + validation_count
+    split = GroupSplit(
+        fold=0,
+        train_indices=np.arange(0, train_count, dtype=np.int64),
+        validation_indices=np.arange(
+            validation_start, test_start, dtype=np.int64
+        ),
+        test_indices=np.arange(
+            test_start, test_start + test_count, dtype=np.int64
+        ),
+    )
+    combined_dataset: Dataset = ConcatDataset(
+        [datasets["train"], datasets["validation"], datasets["test"]]
+    )
+
+    # 把可复现所需的数据内容摘要写回配置快照。路径只能说明文件位置；SHA-256
+    # 才能发现同一路径下的数据后来被替换或重新排序。
+    split_config["sample_counts"] = {
+        role: len(dataset) for role, dataset in datasets.items()
+    }
+    split_config["sha256"] = {
+        role: _sha256_file(path) for role, path in dataset_paths.items()
+    }
+    return (
+        combined_dataset,
+        (PREDEFINED_SPLIT_MODE, [split]),
+        datasets,
+    )
 
 
 def _write_scaler(path: Path, scaler: GlobalFeatureScaler) -> None:
@@ -283,7 +532,7 @@ def _print_metrics_by_flow_speed_table(
 
 def _write_fold_manifest(
     path: Path,
-    dataset: HydroDataset,
+    dataset: Dataset,
     splits: list[GroupSplit],
     split_mode: str,
 ) -> None:
@@ -327,6 +576,55 @@ def _write_fold_manifest(
         writer.writerows(rows)
 
 
+def _write_predefined_manifest(
+    path: Path,
+    dataset: Dataset,
+    split: GroupSplit,
+    config: dict[str, Any],
+) -> None:
+    """保存显式三数据集的角色、来源路径和本地/拼接索引。
+
+    参数：
+        path: 输出 CSV 路径。
+        dataset: 按 train、validation、test 顺序拼接的逻辑数据集。
+        split: 与三个文件边界完全一致的唯一划分。
+        config: 包含三条规范化数据路径的完整运行配置。
+    """
+
+    split_config = config["predefined_split"]
+    path_by_role = {
+        "train": split_config["train_dataset_path"],
+        "validation": split_config["validation_dataset_path"],
+        "test": split_config["test_dataset_path"],
+    }
+    rows: list[dict[str, Any]] = []
+    for role, indices in (
+        ("train", split.train_indices),
+        ("validation", split.validation_indices),
+        ("test", split.test_indices),
+    ):
+        for index in indices:
+            sample = dataset[int(index)]
+            rows.append(
+                {
+                    "role": role,
+                    "dataset_path": path_by_role[role],
+                    "dataset_index": int(index),
+                    "source_index": int(sample["source_index"]),
+                    "sample_id": str(sample["sample_id"]),
+                    "model_id": int(sample["model_id"]),
+                    "plant_count": int(sample["positions"].shape[0]),
+                    "angle": int(sample["angle"]),
+                    "flow_speed": float(sample["flow_speed"]),
+                }
+            )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def _new_model(model_config: dict[str, Any], seed: int) -> HydroTransformer:
     """先固定随机种子，再创建独立模型，保证初始化可复现。"""
 
@@ -335,7 +633,7 @@ def _new_model(model_config: dict[str, Any], seed: int) -> HydroTransformer:
 
 
 def _fit_training_relative_floor(
-    dataset: HydroDataset,
+    dataset: Dataset,
     train_indices: np.ndarray,
     settings: dict[str, Any],
 ) -> float:
@@ -371,14 +669,19 @@ def _checkpoint_metadata(
     checkpoint_role: str,
     relative_floor: float,
     evaluation_source_indices: list[int] | None = None,
+    evaluation_sample_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """构造评估恢复所需的数据来源、标签策略和 held-out 索引。"""
 
     split_mode = str(config["cross_validation"].get("split_mode", "model"))
     validation_test_overlap = split_mode == FLOW_SPEED_SPLIT_MODE
-    return {
+    metadata: dict[str, Any] = {
         "checkpoint_role": checkpoint_role,
-        "dataset_path": config["data"]["dataset_path"],
+        "dataset_path": (
+            config["predefined_split"]["test_dataset_path"]
+            if split_mode == PREDEFINED_SPLIT_MODE
+            else config["data"]["dataset_path"]
+        ),
         "negative_target_policy": config["data"]["negative_target_policy"],
         # 保存训练目标的完整语义；评估可以忽略，断点续训必须严格核对。
         "loss_name": LOSS_NAME,
@@ -399,7 +702,19 @@ def _checkpoint_metadata(
         "split_mode": split_mode,
         "validation_test_overlap": validation_test_overlap,
         "evaluation_source_indices": evaluation_source_indices,
+        "evaluation_sample_ids": evaluation_sample_ids,
     }
+    if split_mode == PREDEFINED_SPLIT_MODE:
+        split_config = config["predefined_split"]
+        metadata["dataset_paths"] = {
+            "train": split_config["train_dataset_path"],
+            "validation": split_config["validation_dataset_path"],
+            "test": split_config["test_dataset_path"],
+        }
+        metadata["dataset_sample_counts"] = dict(split_config["sample_counts"])
+        metadata["dataset_sha256"] = dict(split_config["sha256"])
+        metadata["final_retraining_performed"] = False
+    return metadata
 
 
 def run_overfit(
@@ -463,7 +778,7 @@ def run_overfit(
 
 
 def run_cross_validation(
-    dataset: HydroDataset,
+    dataset: Dataset,
     config: dict[str, Any],
     output_dir: Path,
     prepared_splits: tuple[str, list[GroupSplit]] | None = None,
@@ -483,6 +798,7 @@ def run_cross_validation(
     else:
         split_mode, splits = prepared_splits
     validation_test_overlap = split_mode == FLOW_SPEED_SPLIT_MODE
+    predefined_split = split_mode == PREDEFINED_SPLIT_MODE
     if validation_test_overlap:
         print(
             "flow_speed 模式：0.1/0.2/0.3 m/s 用于训练，完整 0.4 m/s "
@@ -490,16 +806,33 @@ def run_cross_validation(
             "并且本次不会生成 final_model.pt。",
             flush=True,
         )
-    _write_fold_manifest(
-        output_dir / "fold_assignments.csv", dataset, splits, split_mode
-    )
+    if predefined_split:
+        print(
+            "predefined 模式：train 仅用于参数更新，validation 仅用于 early "
+            "stopping，test 仅在最佳 checkpoint 上评估；本次不会执行 final 重训。",
+            flush=True,
+        )
+        _write_predefined_manifest(
+            output_dir / "predefined_split_assignments.csv",
+            dataset,
+            splits[0],
+            config,
+        )
+    else:
+        _write_fold_manifest(
+            output_dir / "fold_assignments.csv", dataset, splits, split_mode
+        )
 
     all_prediction_rows: list[dict[str, Any]] = []
     all_coefficient_rows: list[dict[str, Any]] = []
     fold_summaries: list[dict[str, Any]] = []
     best_epochs: list[int] = []
     for split in splits:
-        fold_dir = output_dir / f"fold_{split.fold}"
+        fold_dir = (
+            output_dir / PREDEFINED_SPLIT_MODE
+            if predefined_split
+            else output_dir / f"fold_{split.fold}"
+        )
         scaler = GlobalFeatureScaler.fit(dataset, split.train_indices)
         relative_floor = _fit_training_relative_floor(
             dataset, split.train_indices, config["training"]
@@ -522,6 +855,10 @@ def run_cross_validation(
             int(dataset[int(index)]["source_index"])
             for index in split.test_indices
         ]
+        test_sample_ids = [
+            str(dataset[int(index)]["sample_id"])
+            for index in split.test_indices
+        ]
         fit_result = fit_with_early_stopping(
             model=model,
             dataset=dataset,
@@ -535,9 +872,15 @@ def run_cross_validation(
             seed=fold_seed,
             relative_floor=relative_floor,
             checkpoint_metadata=_checkpoint_metadata(
-                config, "fold", relative_floor, test_source_indices
+                config,
+                PREDEFINED_SPLIT_MODE if predefined_split else "fold",
+                relative_floor,
+                test_source_indices,
+                test_sample_ids,
             ),
-            progress_label=f"Fold {split.fold}",
+            progress_label=(
+                "Predefined split" if predefined_split else f"Fold {split.fold}"
+            ),
         )
         # 两个角色始终使用相同的最优模型、train-only scaler 和 relative_floor。
         # 普通模式的 test 是独立 held-out 集合；flow_speed 模式则按实验协议让
@@ -657,6 +1000,18 @@ def run_cross_validation(
         "aggregate": aggregate_metrics,
         "folds": fold_summaries,
     }
+    if predefined_split:
+        aggregate_result["dataset_paths"] = {
+            "train": config["predefined_split"]["train_dataset_path"],
+            "validation": config["predefined_split"]["validation_dataset_path"],
+            "test": config["predefined_split"]["test_dataset_path"],
+        }
+        aggregate_result["dataset_sample_counts"] = dict(
+            config["predefined_split"]["sample_counts"]
+        )
+        aggregate_result["dataset_sha256"] = dict(
+            config["predefined_split"]["sha256"]
+        )
 
     # 普通 CV 的合并 test 预测是 out-of-fold 结果：每条样本只在未参与该 fold
     # 训练与 early stopping 时被预测一次。直接在逐样本行上重新计算分组指标，
@@ -669,31 +1024,61 @@ def run_cross_validation(
         aggregate_result["aggregate_by_flow_speed"] = (
             aggregate_metrics_by_flow_speed
         )
-    metrics_path = output_dir / "cv_metrics.json"
+    root_prefix = PREDEFINED_SPLIT_MODE if predefined_split else "cv"
+    metrics_path = output_dir / f"{root_prefix}_metrics.json"
     metrics_path.write_text(
         json.dumps(aggregate_result, ensure_ascii=False, indent=2, allow_nan=True),
         encoding="utf-8",
     )
-    _write_rows(output_dir / "cv_predictions.csv", all_prediction_rows)
-    _write_rows(output_dir / "cv_plant_coefficients.csv", all_coefficient_rows)
+    _write_rows(
+        output_dir / f"{root_prefix}_predictions.csv", all_prediction_rows
+    )
+    _write_rows(
+        output_dir / f"{root_prefix}_plant_coefficients.csv",
+        all_coefficient_rows,
+    )
 
     if aggregate_metrics_by_flow_speed is not None:
         _write_metrics_by_flow_speed(
             output_dir,
-            "cv",
+            root_prefix,
             aggregate_metrics_by_flow_speed,
         )
         # 根目录图直接展示所有 fold 合并后的 held-out test 预测；这比任意单折图
         # 更适合作为整次交叉验证的总体结果。
         write_drag_comparison_plot(
             all_prediction_rows,
-            output_dir / "cv_drag_comparison.png",
-            title="Cross-validation held-out drag comparison",
+            output_dir / f"{root_prefix}_drag_comparison.png",
+            title=(
+                "Predefined test drag comparison"
+                if predefined_split
+                else "Cross-validation held-out drag comparison"
+            ),
         )
         write_drag_comparison_by_flow_speed_plot(
             all_prediction_rows,
-            output_dir / "cv_drag_comparison_by_flow_speed.png",
-            title="Cross-validation held-out drag comparison by flow speed",
+            output_dir / f"{root_prefix}_drag_comparison_by_flow_speed.png",
+            title=(
+                "Predefined test drag comparison by flow speed"
+                if predefined_split
+                else "Cross-validation held-out drag comparison by flow speed"
+            ),
+        )
+        # 仅使用各 fold 的 test 预测生成全测试集散点图，不混入 validation，
+        # 也不使用随后全量重训模型的训练内预测。两图使用相同的原始测量，
+        # 默认各自取范围，图内仍保持 x、y 等比例；配置也可切回共用范围。
+        write_drag_parity_plots(
+            all_prediction_rows,
+            output_dir,
+            prefix=root_prefix,
+            axis_mode=config.get("output", {}).get(
+                "drag_parity_axis_mode", DEFAULT_DRAG_PARITY_AXIS_MODE,
+            ),
+            title=(
+                "Predefined test drag parity"
+                if predefined_split
+                else "Cross-validation held-out test drag parity"
+            ),
         )
         _print_metrics_by_flow_speed_table(aggregate_metrics_by_flow_speed)
 
@@ -703,6 +1088,15 @@ def run_cross_validation(
         print(
             "flow_speed 固定划分完成：已保存 fold_0 及汇总产物；"
             "已按配置跳过全量重训。"
+        )
+        return
+
+    # 用户已经明确指定 test 集时，任何自动全量重训都会改变三集合语义；若把 test
+    # 加入重训还会形成直接数据泄漏。因此 predefined 只保留最佳验证 checkpoint。
+    if predefined_split:
+        print(
+            "predefined 固定三数据集训练完成：已保存 validation/test 产物；"
+            "已按设计跳过 final 重训。"
         )
         return
 
@@ -760,25 +1154,31 @@ def main() -> None:
     """验证输入、安全初始化输出目录，再派发 overfit 或 CV 流程。"""
     print("CUDA available:", torch.cuda.is_available())
     args = parse_args()
-    if args.mode == "cv" and args.resume_checkpoint:
-        raise ValueError("--resume-checkpoint 目前仅用于 overfit 模式。")
     config = load_config(args.config)
     _resolve_config_paths(config)
+    _validate_mode_arguments(args, config)
     _apply_cli_overrides(config, args)
 
     # 先完整加载物理表和 JSONL。若输入无效，程序会在触碰旧训练结果前失败，避免因为
     # 拼错数据路径或 YAML 内容而丢失上一次可用实验。
     physical_config = load_physical_config(config["data"]["physics_config_path"])
     config["resolved_physical_config"] = physical_config.to_dict()
-    dataset = HydroDataset(
-        config["data"]["dataset_path"],
-        negative_target_policy=config["data"]["negative_target_policy"],
-        physical_config=physical_config,
-    )
+    prepared_splits: tuple[str, list[GroupSplit]] | None = None
+    if args.mode == PREDEFINED_SPLIT_MODE:
+        # 三份 JSONL 的 schema、跨集合 sample_id、样本数和内容哈希全部在清理旧产物
+        # 之前验证。任何一项失败都不会破坏上一次训练结果。
+        dataset, prepared_splits, _ = _prepare_predefined_datasets(
+            config, physical_config
+        )
+    else:
+        dataset = HydroDataset(
+            config["data"]["dataset_path"],
+            negative_target_policy=config["data"]["negative_target_policy"],
+            physical_config=physical_config,
+        )
 
     # CV 划分同样在清理前完成验证。这样 split_mode 拼写错误、分组不足或固定速度
     # 缺档时都会保留旧结果；返回的索引随后直接复用，不会重复随机划分。
-    prepared_splits: tuple[str, list[GroupSplit]] | None = None
     if args.mode == "cv":
         prepared_splits = _prepare_cross_validation_splits(dataset, config)
 
@@ -795,7 +1195,7 @@ def main() -> None:
         # fresh run 只允许清理最终解析出的 artifact_dir。保护列表覆盖项目源码、当前
         # 工作目录、用户目录以及本次已经验证过的全部输入文件。
         config_path = Path(args.config).expanduser().resolve(strict=False)
-        protected_paths = (
+        protected_paths: tuple[Path, ...] = (
             Path.home(),
             Path.cwd(),
             PROJECT_ROOT,
@@ -804,6 +1204,15 @@ def main() -> None:
             Path(config["data"]["dataset_path"]),
             Path(config["data"]["physics_config_path"]),
         )
+        if args.mode == PREDEFINED_SPLIT_MODE:
+            protected_paths += tuple(
+                Path(config["predefined_split"][key])
+                for key in (
+                    "train_dataset_path",
+                    "validation_dataset_path",
+                    "test_dataset_path",
+                )
+            )
         output_dir = prepare_fresh_artifact_directory(
             configured_output_dir,
             managed_root=DEFAULT_MANAGED_ARTIFACT_ROOT,
@@ -825,7 +1234,11 @@ def main() -> None:
             prepared_splits=prepared_splits,
         )
         split_mode = str(config["cross_validation"].get("split_mode", "model"))
-        if split_mode == FLOW_SPEED_SPLIT_MODE:
+        if split_mode == PREDEFINED_SPLIT_MODE:
+            recommended_checkpoint = (
+                output_dir / PREDEFINED_SPLIT_MODE / "best.pt"
+            )
+        elif split_mode == FLOW_SPEED_SPLIT_MODE:
             recommended_checkpoint = output_dir / "fold_0" / "best.pt"
         else:
             recommended_checkpoint = output_dir / "final_model.pt"

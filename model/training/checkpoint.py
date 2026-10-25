@@ -13,13 +13,13 @@ from typing import Any
 import torch
 
 
-# version 5 移除角度状态 Token：角度只用于物理默认阻力查表，所有水草共享一个
-# 可学习 Token。旧 checkpoint 的参数结构和输入语义都不同，因此不自动迁移。
-CHECKPOINT_VERSION = 5
+# version 6 使用逐株角度/EI 编码器，并以流速及角度 sin/cos 作全局条件。
+# 共享 Token 的旧权重与新架构不相容，训练和评估均拒绝，不做静默部分加载。
+CHECKPOINT_VERSION = 6
 # 首次替换失败后依次等待这些秒数；因此总共最多尝试 5 次原子替换。
 CHECKPOINT_RETRY_DELAYS_SECONDS = (0.2, 0.5, 1.0, 2.0)
 # Directional attention 没有新增权重。保留这些默认值可读取同一模型架构中缺少
-# 显式方向字段的早期配置快照；跨 v5 的旧角度状态 Token checkpoint 仍会先被拒绝。
+# 显式方向字段的配置快照；低于 v6 的旧 Token checkpoint 仍会先被拒绝。
 LEGACY_DIRECTIONAL_ATTENTION_DEFAULTS = {
     "directional_attention_mode": "none",
     "directional_soft_activation": "relu",
@@ -46,24 +46,28 @@ def resolved_model_config(model: torch.nn.Module) -> dict[str, Any] | None:
     raise TypeError("model.config 必须是 dataclass 或字典，才能写入 checkpoint。")
 
 
-def _validate_model_config(
+def validate_checkpoint_model_config(
     checkpoint: dict[str, Any], model: torch.nn.Module
 ) -> None:
-    """在加载权重前检查 checkpoint 与目标模型的完整配置是否一致。"""
+    """只校验版本和模型配置，不加载或修改模型权重。
+
+    checkpoint 是已读取的状态字典，model 提供当前架构的完整配置；通过时返回
+    None，不匹配时抛出 ValueError。续训也使用此接口检查同目录最佳 checkpoint。
+    """
 
     actual = resolved_model_config(model)
     if actual is None:
         return
     if int(checkpoint.get("checkpoint_version", -1)) < CHECKPOINT_VERSION:
         raise ValueError(
-            "checkpoint 来自旧版角度状态 Token 架构；当前模型不再把角度状态输入"
-            "神经网络，请使用当前代码重新训练。"
+            "checkpoint 来自旧版共享 Token 或角度状态架构；当前模型使用逐株角度/EI"
+            "编码器和三维全局输入，请使用当前代码重新训练。"
         )
     expected = checkpoint.get("model_config")
     if not isinstance(expected, dict):
         raise ValueError("checkpoint 缺少完整 model_config，无法安全恢复 HydroTransformer。")
-    # 旧 v4 checkpoint 保存于 directional attention 引入之前。仅当目标模型也采用
-    # 兼容默认值时，这些缺失字段才会在补全后匹配；尝试用 soft/hard 续训仍会被拒绝。
+    # 同一新架构的配置快照若省略方向开关，按直接构造的默认值补齐再比较。
+    # 老架构已经在上面拒绝，因此这里不会把旧 Token 权重伪装成新编码器权重。
     normalized_expected = dict(expected)
     for key, default_value in LEGACY_DIRECTIONAL_ATTENTION_DEFAULTS.items():
         normalized_expected.setdefault(key, default_value)
@@ -146,7 +150,7 @@ def load_checkpoint(
     """
 
     checkpoint = torch.load(Path(path), map_location=map_location, weights_only=False)
-    _validate_model_config(checkpoint, model)
+    validate_checkpoint_model_config(checkpoint, model)
     model.load_state_dict(checkpoint["model_state"])
     if optimizer is not None and checkpoint.get("optimizer_state") is not None:
         optimizer.load_state_dict(checkpoint["optimizer_state"])

@@ -1,0 +1,153 @@
+{
+  "input_root": "C:\\Users\\Mayn\\Desktop\\myfiles\\Transformer project\\transformer-for-muti-vegetation\\data\\zyp",
+  "output_dir": "C:\\Users\\Mayn\\Desktop\\myfiles\\Transformer project\\transformer-for-muti-vegetation\\datasets\\zyp_20261021",
+  "parameters": {
+    "input_root": "C:\\Users\\Mayn\\Desktop\\myfiles\\Transformer project\\transformer-for-muti-vegetation\\data\\zyp",
+    "output_dir": "C:\\Users\\Mayn\\Desktop\\myfiles\\Transformer project\\transformer-for-muti-vegetation\\datasets\\zyp_20261021",
+    "audit_dir": "C:\\Users\\Mayn\\Desktop\\myfiles\\Transformer project\\transformer-for-muti-vegetation\\文档\\工作记录\\zyp数据处理20261021",
+    "layout_csv": "C:\\Users\\Mayn\\Desktop\\myfiles\\Transformer project\\transformer-for-muti-vegetation\\Experiment\\input.csv",
+    "config": "C:\\Users\\Mayn\\Desktop\\myfiles\\Transformer project\\transformer-for-muti-vegetation\\Experiment\\stiffness_config.yaml",
+    "sensor_fs": 1000.0,
+    "gather_fs": 100.0,
+    "start_seconds": 3.0,
+    "end_seconds": 4.99,
+    "cutoff_hz": 2.0,
+    "filter_order": 5,
+    "trim_fraction": 0.1,
+    "repeatability_threshold": null,
+    "speed_cv_limit": 1.0,
+    "speed_deviation_limit": 5.0,
+    "overwrite": false,
+    "short_sensor_policy": "drop-pair",
+    "incomplete_error_percent": 10000.0
+  },
+  "time_alignment": "sensor 与 gather 第 0 行均为 t=0，已由用户确认；截取采用左闭右开区间",
+  "stiffness_by_code_N_m2": {
+    "1": 8e-07,
+    "2": 5.907e-06,
+    "3": 2.08e-05
+  },
+  "repeatability_threshold_percent": 15.0,
+  "uniform_motion_rule": "速度非零、无反向或停步、差分速度CV及最大偏差均不超过参数阈值；仅诊断，不参与筛选",
+  "gather_displacement_to_meters": 1e-06,
+  "source_file_count": 4896,
+  "repeatability_pair_count": 1224,
+  "retained_pair_count": 1197,
+  "rejected_pair_count": 27,
+  "noncomparable_pair_count": 4,
+  "incomplete_error_percent_marker": 10000.0,
+  "repeatability_rejected_pair_count": 23,
+  "short_sensor_files": [
+    "data/zyp/model10/sensor_4_round2_ang285.csv",
+    "data/zyp/model12/sensor_2_round1_ang120.csv",
+    "data/zyp/model13/sensor_2_round2_ang300.csv",
+    "data/zyp/model15/sensor_3_round2_ang0.csv"
+  ],
+  "uniform_motion_file_count": 2448,
+  "nonuniform_motion_files": [],
+  "by_model": {
+    "1": {
+      "pairs": 72,
+      "retained": 68
+    },
+    "2": {
+      "pairs": 72,
+      "retained": 68
+    },
+    "3": {
+      "pairs": 72,
+      "retained": 70
+    },
+    "4": {
+      "pairs": 72,
+      "retained": 70
+    },
+    "5": {
+      "pairs": 72,
+      "retained": 70
+    },
+    "6": {
+      "pairs": 72,
+      "retained": 72
+    },
+    "7": {
+      "pairs": 72,
+      "retained": 70
+    },
+    "8": {
+      "pairs": 72,
+      "retained": 69
+    },
+    "9": {
+      "pairs": 72,
+      "retained": 72
+    },
+    "10": {
+      "pairs": 72,
+      "retained": 70
+    },
+    "11": {
+      "pairs": 72,
+      "retained": 71
+    },
+    "12": {
+      "pairs": 72,
+      "retained": 71
+    },
+    "13": {
+      "pairs": 72,
+      "retained": 71
+    },
+    "14": {
+      "pairs": 72,
+      "retained": 72
+    },
+    "15": {
+      "pairs": 72,
+      "retained": 71
+    },
+    "16": {
+      "pairs": 72,
+      "retained": 71
+    },
+    "17": {
+      "pairs": 72,
+      "retained": 71
+    }
+  },
+  "by_speed": {
+    "0.2": {
+      "pairs": 408,
+      "retained": 387
+    },
+    "0.3": {
+      "pairs": 408,
+      "retained": 403
+    },
+    "0.4": {
+      "pairs": 408,
+      "retained": 407
+    }
+  },
+  "provenance_sha256": {
+    "Experiment\\input.csv": "9208151b332dc3f093ad0091a6a04786223259f4a3a7db3faeb38cb600aab50a",
+    "Experiment\\stiffness_config.yaml": "5246537311d1b4c18bafb47f568dec6276e8fcb3bb9ac44e06359b1a00c5675a",
+    "Experiment\\process_zyp_data.py": "41c52add8235d9cb16367c296340152e7c086f4af4fd450623ac0afc2dd5754f",
+    "Experiment\\filter_sensor_data.py": "9f6ccc786f98982e7d95801a5212f9cbe4cf5e7f5062c3dbf9efc21523ad689f",
+    "Experiment\\gather_data.py": "2dae47dc758c1dc38c4ff048e1b651acb4c398ba550a8faf74d88cb06e5ff223",
+    "Experiment\\summarize_sensor_data.py": "34a9d5a29be495f40853dd5374781ac0924563200a323ff3f978e4189315fda1",
+    "Experiment\\rotate_force.py": "4b140732c1dd84c77291d07f7359171250c797df0f8d57f035cfe6d88d71da70",
+    "Experiment\\generator.py": "e5e5c7a953f03dc63499c73fd532b45aa95aa43ec1e602de565a9eee6e774889",
+    "model\\hydro\\geometry.py": "f1a547eb4a0af7e4f172d9170a695e69531f1e5848457f909c3798a67909a8a7"
+  },
+  "output_sha256": {
+    "dataset.jsonl": "61aee0bf324f55ce75a50544b6bb91c51b8a0a2f30b9c2876eb05b019a887997",
+    "repeatability.csv": "4760308555f2ccac375299f9c26379485706b9d28594fb89b496db029ecd9f26",
+    "逐轮处理与运动诊断.csv": "615381db47472a19a6706544d677254b318536b21f821fc99ce47efd1d48472e"
+  },
+  "library_versions": {
+    "numpy": "2.4.6",
+    "pandas": "3.0.5",
+    "scipy": "1.17.1"
+  }
+}

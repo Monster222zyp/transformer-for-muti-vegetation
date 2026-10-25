@@ -189,7 +189,7 @@ def test_dataset_clamps_negative_targets_and_preserves_raw_values(
     negative_samples = [sample for sample in dataset if sample["raw_target_drag"].item() < 0.0]
     assert len(negative_samples) == 4
     assert all(sample["target_drag"].item() == 0.0 for sample in negative_samples)
-    assert all(sample["global_features"].item() == pytest.approx(sample["flow_speed"]) for sample in dataset)
+    assert all(sample["global_features"][0].item() == pytest.approx(sample["flow_speed"]) for sample in dataset)
 
 
 def test_dataset_rejects_unknown_negative_target_policy_before_file_access() -> None:
@@ -218,7 +218,7 @@ def test_collate_dynamically_pads_with_false_mask(
     first_count = first["positions"].shape[0]
     assert not batch["plant_mask"][0, first_count:].any()
     assert torch.count_nonzero(batch["single_drag"][0, first_count:]) == 0
-    assert batch["plant_angles"].dtype == torch.long
+    assert batch["plant_angles"].dtype == torch.float32
     assert torch.count_nonzero(batch["plant_angles"][0, first_count:]) == 0
 
 

@@ -1,23 +1,34 @@
-# 物理实验测得的单根水草基准阻力，单位为 N。
-# 两个状态分别对应两组周期旋转角度，每组包含四档流速的正式实验值。
-version: 1
+# 几何与流体参数对应当前实验；每株实测弯曲刚度 EI 来自 JSONL 的 stiffness。
+# 不再填写确切力：默认力按三列叶片和圆柱计算，单位 N。
+# 转盘角 A -> [(A+60)%360, (A+180)%360, (A+300)%360]，列顺序固定。
+version: 3
 drag_unit: N
+backend: seagrass_drag_v0.1.0
 
-states:
-  1:
-    # 状态 1 对应初始朝向及其 120° 周期旋转。
-    angles_deg: [0, 120, 240]
-    single_drag_by_flow_speed:
-      "0.1": 0.110
-      "0.2": 0.458
-      "0.3": 1.095
-      "0.4": 2.08
+geometry:
+  cylinder_diameter_m: 0.015   # 圆柱支撑直径 D，m。
+  cylinder_height_m: 0.23     # 圆柱支撑高度 H，m。
+  blade_length_m: 0.08        # 单片叶片长度 L，m。
+  blade_thickness_m: 0.002    # 单片厚度 t，m；对 EI 有三次方影响。
+  blade_height_m: 0.02       # 单片宽度/高度 h，m；不是整株覆盖高度。
+  blades_per_column: 5       # 每列片数；三列共 15 片，求解器内部已汇总。
 
-  2:
-    # 状态 2 相对状态 1 旋转 60°，同样具有 120° 周期。
-    angles_deg: [60, 180, 300]
-    single_drag_by_flow_speed:
-      "0.1": 0.108
-      "0.2": 0.416
-      "0.3": 0.883
-      "0.4": 1.463
+material:
+  stiffness_unit: N*m^2  # stiffness=EI，N·m²；适配层按 I=h*t³/12、E=EI/I 恢复 E。
+
+fluid:
+  water_density_kg_m3: 1000.0   # 水密度 rho，kg/m³；流速来自每条 JSONL。
+
+drag:
+  blade_drag_coefficient: 2.0   # 叶片阻力系数，无量纲。
+  cylinder_drag_coefficient: 1.2  # 圆柱阻力系数，无量纲。
+
+solver:
+  nodes: 200                 # 沿叶片长度的离散节点数，至少 5。
+  max_iterations: 3000       # 每列迭代上限；0 使用原脚本的刚性参考分支。
+  tolerance_m: 0.000001      # 位移残差容差，m；保留原脚本的软材料调整规则。
+  enable_shielding: true     # 是否启用原脚本对第二列的遮蔽修正。
+  shielding_type: linear     # 可选 linear/quadratic/cubic/exponential/sqrt。
+  min_shielding: 0.4         # 最大遮蔽时保留的力比例。
+  max_shielding: 1.0         # 最小遮蔽时保留的力比例。
+  initial_angle_difference_deg: 120.0  # 遮蔽曲线的参考角差，度。

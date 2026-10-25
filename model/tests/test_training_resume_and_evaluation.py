@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import math
 from pathlib import Path
 
 import numpy as np
@@ -28,6 +29,7 @@ from model.training.trainer import (
     GlobalFeatureScaler,
     _build_adamw,
     _sample_loss_history,
+    _validated_sibling_best_state,
     fit_fixed_epochs,
     fit_with_early_stopping,
     predict_dataset,
@@ -62,7 +64,12 @@ class TinyHydroDataset(Dataset):
                         (2,), source_index * 60, dtype=torch.long
                     ),
                     "plant_mask": torch.ones(2, dtype=torch.bool),
-                    "global_features": torch.tensor([0.1 + source_index * 0.1]),
+                    "plant_stiffness": torch.ones(2),
+                    "global_features": torch.tensor([
+                        0.1 + source_index * 0.1,
+                        math.sin(math.radians(source_index * 60)),
+                        math.cos(math.radians(source_index * 60)),
+                    ]),
                     "target_drag": torch.tensor(target),
                     "raw_target_drag": torch.tensor(target),
                     "sample_id": f"sample_{source_index}",
@@ -292,6 +299,62 @@ def test_resume_to_new_directory_recreates_best_checkpoint(tmp_path: Path) -> No
     assert result.best_checkpoint == resumed_dir / "best.pt"
     assert result.best_checkpoint.is_file()
     load_checkpoint(result.best_checkpoint, resumed_model)
+
+
+@pytest.mark.parametrize("mismatch", ["old_version", "model_config", "scaler", "physical",
+                                      "best_epoch", "best_loss", "weight_shape"])
+def test_resume_rejects_mismatched_sibling_best_without_relabeling(
+    tmp_path: Path, mismatch: str,
+) -> None:
+    """有效新 last.pt 不能把同目录错误 best.pt 重新包装成 v6 权重。"""
+
+    dataset = TinyHydroDataset()
+    indices = np.arange(len(dataset), dtype=np.int64)
+    scaler = GlobalFeatureScaler.fit(dataset, indices)
+    model = _new_model(SMALL_MODEL_CONFIG, seed=7)
+    original_dir = tmp_path / "original"
+    fit_with_early_stopping(
+        model, dataset, indices, indices, collate_hydro_samples, _settings(max_epochs=1),
+        scaler, original_dir, SMALL_MODEL_CONFIG, seed=7, relative_floor=0.1,
+        checkpoint_metadata={"physical_config": {"version": 3, "material": {"stiffness_unit": "N*m^2"}}},
+    )
+    best_path = original_dir / "best.pt"
+    sibling = torch.load(best_path, map_location="cpu", weights_only=False)
+    last = torch.load(original_dir / "last.pt", map_location="cpu", weights_only=False)
+    before = {name: value.clone() for name, value in model.state_dict().items()}
+    # 先证明合法最佳快照可读且不会覆盖 model，随后仅污染一个独立契约。
+    assert _validated_sibling_best_state(best_path, last, model, scaler).keys() == before.keys()
+    if mismatch == "old_version":
+        sibling["checkpoint_version"] = CHECKPOINT_VERSION - 1
+    elif mismatch == "model_config":
+        sibling["model_config"]["plant_encoder_hidden_dim"] += 1
+    elif mismatch == "scaler":
+        sibling["scaler"]["mean"][0] += 1.0
+    elif mismatch == "physical":
+        sibling["checkpoint_metadata"]["physical_config"]["version"] = 2
+    elif mismatch == "best_epoch":
+        sibling["best_epoch"] += 1
+    elif mismatch == "best_loss":
+        sibling["best_validation_loss"] += 1.0
+    else:
+        first_name = next(iter(sibling["model_state"]))
+        sibling["model_state"][first_name] = torch.zeros(1)
+    save_checkpoint(best_path, sibling)
+    with pytest.raises(ValueError):
+        _validated_sibling_best_state(best_path, last, model, scaler)
+    for name, value in model.state_dict().items():
+        torch.testing.assert_close(value, before[name], rtol=0, atol=0)
+
+    # 真实恢复入口也必须拒绝污染文件，不能先生成看似合法的目标 best.pt。
+    resumed_dir = tmp_path / "resumed"
+    with pytest.raises(ValueError):
+        fit_with_early_stopping(
+            _new_model(SMALL_MODEL_CONFIG, seed=99), dataset, indices, indices,
+            collate_hydro_samples, _settings(max_epochs=1), scaler, resumed_dir,
+            SMALL_MODEL_CONFIG, seed=7, relative_floor=0.1,
+            checkpoint_metadata=last["checkpoint_metadata"], resume_from=original_dir / "last.pt",
+        )
+    assert not (resumed_dir / "best.pt").exists()
 
 
 def test_resume_rejects_old_absolute_loss_but_inference_loads_it(
@@ -556,7 +619,7 @@ def test_checkpoint_preserves_physics_and_rejects_old_state_token_version(
 
     old_path = tmp_path / "old_state_token.pt"
     save_checkpoint(old_path, {**state, "checkpoint_version": 4})
-    with pytest.raises(ValueError, match="旧版角度状态 Token"):
+    with pytest.raises(ValueError, match="旧版共享 Token.*重新训练"):
         load_checkpoint(old_path, model)
 
 

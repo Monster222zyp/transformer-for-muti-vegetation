@@ -1,0 +1,68 @@
+{
+  "samples": 287,
+  "error_bars": 287,
+  "width_pixels": 10800,
+  "height_pixels": 3600,
+  "detail_image": {
+    "samples": 287,
+    "error_bars": 287,
+    "width_pixels": 10800,
+    "height_pixels": 3600
+  },
+  "parameters": {
+    "predictions": "C:\\Users\\Mayn\\Desktop\\myfiles\\Transformer project\\multiR_60deg_sample\\cv_predictions.csv",
+    "repeats": "C:\\Users\\Mayn\\Desktop\\myfiles\\Transformer project\\transformer-for-muti-vegetation\\datasets\\multi_stiffness\\repeatability.csv",
+    "output_stem": "C:\\Users\\Mayn\\Desktop\\myfiles\\Transformer project\\multiR_60deg_sample\\cv_drag_comparison_with_uncertainty",
+    "audit_dir": "C:\\Users\\Mayn\\Desktop\\myfiles\\Transformer project\\transformer-for-muti-vegetation\\文档\\工作记录\\60度误差棒绘图20261021",
+    "font_path": "C:\\Windows\\Fonts\\msyh.ttc",
+    "dpi": 600,
+    "width": 18.0,
+    "height": 6.0,
+    "marker_size": 0.45,
+    "line_width": 0.5,
+    "error_line_width": 0.9,
+    "cap_size": 1.5,
+    "expected_samples": 287,
+    "overwrite": true
+  },
+  "uncertainty_definition": "两轮独立实验 FX_0 的均值 ±1 个样本SD，ddof=1，n=2；SD=abs(F1-F2)/sqrt(2)",
+  "sort_order": [
+    "isolated_drag",
+    "target_drag",
+    "source_index"
+  ],
+  "fold_counts": {
+    "4": 57,
+    "0": 58,
+    "1": 58,
+    "2": 57,
+    "3": 57
+  },
+  "angle_counts": {
+    "60.0": 50,
+    "180.0": 51,
+    "300.0": 48,
+    "120.0": 50,
+    "240.0": 51,
+    "0.0": 37
+  },
+  "sd_range_N": [
+    0.00038698536726089445,
+    0.3416609856412699
+  ],
+  "maximum_label_mean_difference_N": 2.356665191882712e-07,
+  "input_sha256": {
+    "C:\\Users\\Mayn\\Desktop\\myfiles\\Transformer project\\transformer-for-muti-vegetation\\datasets\\multi_stiffness\\repeatability.csv": "4760308555f2ccac375299f9c26379485706b9d28594fb89b496db029ecd9f26",
+    "C:\\Users\\Mayn\\Desktop\\myfiles\\Transformer project\\multiR_60deg_sample\\cv_predictions.csv": "b679e13112b7386870019d3b13410389d54daf2db9d94bcbedd7aa3c8f5e0ec7"
+  },
+  "output_sha256": {
+    "C:\\Users\\Mayn\\Desktop\\myfiles\\Transformer project\\multiR_60deg_sample\\cv_drag_comparison_with_uncertainty.png": "90547e47d25a52aed93b205822453b9150c33f70043b45e91edbb3b6fa7b22b4",
+    "C:\\Users\\Mayn\\Desktop\\myfiles\\Transformer project\\multiR_60deg_sample\\cv_drag_comparison_with_uncertainty.svg": "0eb4c16005d920f5ad026dd0a105289e2089d901328ced30ab46d796d8375628",
+    "C:\\Users\\Mayn\\Desktop\\myfiles\\Transformer project\\multiR_60deg_sample\\cv_drag_comparison_with_uncertainty_data.csv": "bcee547a72211d635bdd44681301121376c6db1c31acac2f6407fb5f7713fe81",
+    "C:\\Users\\Mayn\\Desktop\\myfiles\\Transformer project\\transformer-for-muti-vegetation\\文档\\工作记录\\60度误差棒绘图20261021\\绘图预览.png": "b74c5cb5a1ff476fbe7ad43eef8ae54e67d7d773441f67fb0a36025b3663a75c",
+    "C:\\Users\\Mayn\\Desktop\\myfiles\\Transformer project\\multiR_60deg_sample\\cv_drag_comparison_with_uncertainty_detail.png": "99c909d9376fa73921e8611f392791f1575affb6eb27d33114696982fbd27c0e",
+    "C:\\Users\\Mayn\\Desktop\\myfiles\\Transformer project\\multiR_60deg_sample\\cv_drag_comparison_with_uncertainty_detail.svg": "96dbdd566da799377ac88ae6f57bb9623e8138146ff874393489629f7cf743c2",
+    "C:\\Users\\Mayn\\Desktop\\myfiles\\Transformer project\\transformer-for-muti-vegetation\\文档\\工作记录\\60度误差棒绘图20261021\\误差棒细节预览.png": "a2db9b93896b9922c66eb41ce20466072aef01b0898e1ecbcaecdef78b73061b"
+  },
+  "script_sha256": "cd985b653a7859a848e9e727391ed362c6da9bee174a7b247b96aaeb8a78e4f5"
+}

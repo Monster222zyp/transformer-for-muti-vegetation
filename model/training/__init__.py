@@ -18,6 +18,7 @@ from .visualization import (
     sort_drag_predictions,
     write_drag_comparison_by_flow_speed_plot,
     write_drag_comparison_plot,
+    write_drag_parity_plots,
 )
 
 __all__ = [
@@ -37,4 +38,5 @@ __all__ = [
     "sort_drag_predictions",
     "write_drag_comparison_by_flow_speed_plot",
     "write_drag_comparison_plot",
+    "write_drag_parity_plots",
 ]

@@ -1,0 +1,20 @@
+paths:
+  checkpoint_path: C:\Users\Mayn\Desktop\myfiles\Transformer project\transformer-for-muti-vegetation\model\artifacts\final_model.pt
+  samples_dataset_path: C:\Users\Mayn\Desktop\myfiles\Transformer project\transformer-for-muti-vegetation\文档\工作记录\逐株系数绘图修复20261022\单样本验证.jsonl
+  output_directory: C:\Users\Mayn\Desktop\myfiles\Transformer project\transformer-for-muti-vegetation\文档\工作记录\逐株系数绘图修复20261022\真实样本预览
+runtime:
+  device: auto
+visualization:
+  gaussian_sigma: 0.85
+  gaussian_boundary_padding_rings: 1.0
+  heatmap_grid_size: 260
+  contour_levels: 90
+  image_dpi: 220
+  figure_size_inches:
+  - 7.2
+  - 6.4
+  point_colormap: viridis
+  gaussian_colormap: magma
+  annotate_coefficients: true
+  show_plant_centers: true
+  shared_color_scale: true

@@ -1,0 +1,16 @@
+# input.csv 中 0 表示空位置；任意正整数表示一种已实测的材料类别。
+# stiffness_by_code 的值为抗弯刚度 EI，单位 N·m²，必须是正且有限的数值。
+# 类别编号仅用于查表，不能把编号本身、归一化值或默认补值当作 EI。
+# 可以新增例如 7: 3.6；对应的 input.csv 可直接使用类别 7。
+stiffness_by_code:
+  1: 8.000e-7
+  2: 5.907e-6
+  3: 2.080e-5
+
+# full17 模式排除以下流速（单位 m/s）；legacy14 默认保留历史全部流速。
+excluded_flow_speeds:
+  - 0.1
+
+# 新 model 15～17 的 FX_0 两轮对称差率超过此百分数时整对删除。
+# 等于阈值保留；合格整对在逐轮截尾、力旋转之后对六个测量值求平均。
+repeatability_threshold_percent: 15.0

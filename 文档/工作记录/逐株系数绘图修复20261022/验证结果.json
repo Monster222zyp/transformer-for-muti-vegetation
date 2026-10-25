@@ -1,0 +1,18 @@
+{
+  "device": "cuda",
+  "checkpoint": "C:\\Users\\Mayn\\Desktop\\myfiles\\Transformer project\\transformer-for-muti-vegetation\\model\\artifacts\\final_model.pt",
+  "sample_count": 287,
+  "plant_count": 2755,
+  "all_predictions_finite": true,
+  "cli_returncode": 0,
+  "images": [
+    "C:\\Users\\Mayn\\Desktop\\myfiles\\Transformer project\\transformer-for-muti-vegetation\\文档\\工作记录\\逐株系数绘图修复20261022\\真实样本预览\\row_0000_model_01_angle_000_flow_0p4_gaussian_influence.png",
+    "C:\\Users\\Mayn\\Desktop\\myfiles\\Transformer project\\transformer-for-muti-vegetation\\文档\\工作记录\\逐株系数绘图修复20261022\\真实样本预览\\row_0000_model_01_angle_000_flow_0p4_point_coefficients.png"
+  ],
+  "warning_count": 36,
+  "warning_examples": [
+    "抗弯刚度 EI=8.000e-07 N·m² 过低，可能出现数值不稳定",
+    "抗弯刚度 EI=5.907e-06 N·m² 过低，可能出现数值不稳定"
+  ],
+  "elapsed_seconds": 28.31
+}

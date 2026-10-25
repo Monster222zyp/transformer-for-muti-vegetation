@@ -1,4 +1,34 @@
 {
     "python-envs.defaultEnvManager": "ms-python.python:conda",
-    "python-envs.defaultPackageManager": "ms-python.python:conda"
+    "python-envs.defaultPackageManager": "ms-python.python:conda",
+
+    // 使用项目内的本地样式，不依赖全局设置中的网络 CSS 或示例路径。
+    "markdown-pdf.styles": [".vscode/markdown-pdf.css"],
+    "markdown-pdf.stylesRelativePathFile": false,
+    "markdown-pdf.includeDefaultStyles": false,
+
+    // A4 纵向；缩放保持原始字号，四周预留适合阅读和打印的空间。
+    "markdown-pdf.format": "A4",
+    "markdown-pdf.orientation": "portrait",
+    "markdown-pdf.scale": 1,
+    "markdown-pdf.width": "",
+    "markdown-pdf.height": "",
+    "markdown-pdf.margin.top": "22mm",
+    "markdown-pdf.margin.bottom": "20mm",
+    "markdown-pdf.margin.left": "22mm",
+    "markdown-pdf.margin.right": "22mm",
+
+    // 页眉留空，仅在页脚显示页码；不显示文件名、日期或本机路径。
+    "markdown-pdf.displayHeaderFooter": true,
+    "markdown-pdf.headerTemplate": "<div></div>",
+    "markdown-pdf.footerTemplate": "<div style=\"width:100%;text-align:center;font-family:'Times New Roman',SimSun,serif;font-size:9pt;color:#666;\"><span class='pageNumber'></span> / <span class='totalPages'></span></div>",
+    "markdown-pdf.printBackground": true,
+    "markdown-pdf.pageRanges": "",
+
+    // 手动导出完整 PDF，放在 Markdown 同一目录，不在每次保存时自动覆盖。
+    "markdown-pdf.type": ["pdf"],
+    "markdown-pdf.outputDirectory": "",
+    "markdown-pdf.convertOnSave": false,
+    "markdown-pdf.breaks": false,
+    "markdown-pdf.executablePath": "C:/Program Files/Google/Chrome/Application/chrome.exe"
 }

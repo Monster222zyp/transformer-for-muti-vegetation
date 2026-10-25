@@ -21,6 +21,7 @@ from .checkpoint import (
     load_checkpoint,
     resolved_model_config,
     save_checkpoint,
+    validate_checkpoint_model_config,
 )
 from .losses import (
     DEFAULT_RELATIVE_FLOOR_QUANTILE,
@@ -37,8 +38,10 @@ DEFAULT_EPOCH_REPORT_INTERVAL = 10
 DEFAULT_LOSS_PLOT_INTERVAL = 10
 DEFAULT_CHECKPOINT_INTERVAL = 100
 DEFAULT_MIRROR_AUGMENTATION = False
+GLOBAL_FEATURE_NAMES = ("flow_speed", "angle_sin", "angle_cos")
+GLOBAL_STANDARDIZE_MASK = (True, False, False)  # 只拟合流速，保留角度单位圆。
 # checkpoint 和配置使用这个稳定名称记录训练目标，防止误用旧 absolute-MSE
-# checkpoint 续训；推理加载不会检查该字段，因此旧权重仍可安全用于预测。
+# checkpoint 续训；同一新架构的历史 loss 权重仍可用于预测，但旧 Token 架构被拒绝。
 LOSS_NAME = "stabilized_relative_mse"
 
 
@@ -307,14 +310,37 @@ def write_training_history_csv(
 
 @dataclass(frozen=True)
 class GlobalFeatureScaler:
-    """按训练集合统计的全局特征标准化参数。"""
+    """只按训练集合标准化流速；角度 sin/cos 始终保持原值。
+
+    mean/std 保存每列参数；feature_names 和 standardize_mask 明确特征顺序及
+    哪些列做标准化，防止 checkpoint 恢复时误把角度当成普通标量。
+    """
 
     mean: tuple[float, ...]
     std: tuple[float, ...]
+    feature_names: tuple[str, ...] = ()
+    standardize_mask: tuple[bool, ...] = ()
+
+    def __post_init__(self) -> None:
+        """验证参数并为直接构造或单特征基础设施测试补足契约。"""
+
+        dimension = len(self.mean)
+        if dimension not in (1, 3) or len(self.std) != dimension:
+            raise ValueError("scaler 必须包含流速单列或流速/sin角/cos角三列。")
+        if not all(math.isfinite(value) for value in self.mean + self.std) or any(value <= 0 for value in self.std):
+            raise ValueError("scaler 的均值和标准差必须有限，标准差必须为正。")
+        names = GLOBAL_FEATURE_NAMES if dimension == 3 else ("flow_speed",)
+        mask = GLOBAL_STANDARDIZE_MASK if dimension == 3 else (True,)
+        if self.feature_names and self.feature_names != names:
+            raise ValueError("scaler 的 feature_names 与全局特征顺序不一致。")
+        if self.standardize_mask and self.standardize_mask != mask:
+            raise ValueError("scaler 只能标准化 flow_speed，不能标准化角度 sin/cos。")
+        object.__setattr__(self, "feature_names", names)
+        object.__setattr__(self, "standardize_mask", mask)
 
     @classmethod
     def fit(cls, dataset: Dataset, indices: Sequence[int]) -> "GlobalFeatureScaler":
-        """只读取给定训练索引，计算逐特征均值和标准差。"""
+        """只读取给定训练索引拟合流速；sin/cos 的 mean=0、std=1。"""
 
         values = []
         for index in indices:
@@ -325,29 +351,41 @@ class GlobalFeatureScaler:
         if not values:
             raise ValueError("无法从空训练集合拟合 global feature scaler。")
         matrix = np.stack(values, axis=0)
+        if matrix.shape[1] not in (1, 3) or not np.isfinite(matrix).all():
+            raise ValueError("全局输入必须为有限流速单列或三列 [flow_speed,sin角,cos角]。")
         mean = matrix.mean(axis=0)
         std = matrix.std(axis=0)
         # 单一流速或常量物理特征的标准差设为 1，保证输出有限。
         std = np.where(std < 1.0e-12, 1.0, std)
+        if matrix.shape[1] == 3:
+            mean[1:] = 0.0
+            std[1:] = 1.0
         return cls(tuple(mean.tolist()), tuple(std.tolist()))
 
     def transform(self, values: torch.Tensor) -> torch.Tensor:
-        """使用与输入相同的 device/dtype 标准化 batch。"""
+        """使用输入设备和精度标准化流速，另外两列逐值保留。"""
 
+        if values.shape[-1] != len(self.mean):
+            raise ValueError("scaler 与输入全局特征维度不一致。")
         mean = values.new_tensor(self.mean)
         std = values.new_tensor(self.std)
-        return (values - mean) / std
+        mask = torch.tensor(self.standardize_mask, dtype=torch.bool, device=values.device)
+        return torch.where(mask, (values - mean) / std, values)
 
-    def to_dict(self) -> dict[str, list[float]]:
+    def to_dict(self) -> dict[str, Any]:
         """转换为可写入 JSON/checkpoint 的字典。"""
 
-        return {"mean": list(self.mean), "std": list(self.std)}
+        return {"mean": list(self.mean), "std": list(self.std),
+                "feature_names": list(self.feature_names),
+                "standardize_mask": list(self.standardize_mask)}
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "GlobalFeatureScaler":
         """从 checkpoint 中恢复 scaler。"""
 
-        return cls(tuple(payload["mean"]), tuple(payload["std"]))
+        return cls(tuple(payload["mean"]), tuple(payload["std"]),
+                   tuple(payload.get("feature_names", ())),
+                   tuple(payload.get("standardize_mask", ())))
 
 
 @dataclass(frozen=True)
@@ -367,6 +405,50 @@ class PredictionResult:
     metrics: dict[str, float]
     predictions: list[dict[str, Any]]
     plant_coefficients: list[dict[str, Any]]
+
+
+def _validated_sibling_best_state(
+    path: Path, resume_state: dict[str, Any], model: torch.nn.Module,
+    scaler: GlobalFeatureScaler,
+) -> dict[str, torch.Tensor]:
+    """只读核对 best.pt 与 last.pt 的来源，返回通过校验的最佳权重。
+
+    path 是 last.pt 同目录的 best.pt；resume_state 是已经通过续训检查的 last
+    状态。此函数不加载权重到 model，因而不会覆盖已恢复的最后一个 epoch。
+    """
+
+    sibling = torch.load(path, map_location="cpu", weights_only=False)
+    if not isinstance(sibling, dict):
+        raise ValueError("同目录 best.pt 必须是 checkpoint 状态字典。")
+    validate_checkpoint_model_config(sibling, model)
+    # 版本/模型相同仍可能是另一场实验，因此还要比较训练集标准化、物理参数、
+    # 数据划分及训练目标 metadata；比较 last 的快照，不受新输出目录路径影响。
+    if sibling.get("checkpoint_type") != "best":
+        raise ValueError("同目录 best.pt 的 checkpoint_type 必须为 best。")
+    if not isinstance(sibling.get("scaler"), dict):
+        raise ValueError("同目录 best.pt 缺少 scaler。")
+    if GlobalFeatureScaler.from_dict(sibling["scaler"]).to_dict() != scaler.to_dict():
+        raise ValueError("同目录 best.pt 的 scaler 与 last.pt 不一致。")
+    if sibling.get("checkpoint_metadata") != resume_state.get("checkpoint_metadata"):
+        raise ValueError("同目录 best.pt 的物理/数据/训练目标 metadata 与 last.pt 不一致。")
+    for key in ("best_epoch", "best_validation_loss", "loss_name", "relative_floor",
+                "relative_floor_strategy", "relative_floor_quantile"):
+        if sibling.get(key) != resume_state.get(key):
+            raise ValueError(f"同目录 best.pt 的 {key} 与 last.pt 不一致。")
+    if sibling.get("epoch") != int(resume_state["best_epoch"]) - 1:
+        raise ValueError("同目录 best.pt 的 epoch 与记录的最佳 epoch 不一致。")
+
+    # 配置一致不保证文件中的张量完整；逐项检查结构，避免把损坏/旧架构权重
+    # 包装成新版本再写出。这里仅比较形状，不复制权重或改变训练随机状态。
+    weights = sibling.get("model_state")
+    expected_weights = model.state_dict()
+    if not isinstance(weights, dict) or weights.keys() != expected_weights.keys():
+        raise ValueError("同目录 best.pt 的 model_state 字段与当前模型不一致。")
+    for name, expected in expected_weights.items():
+        value = weights[name]
+        if not isinstance(value, torch.Tensor) or value.shape != expected.shape:
+            raise ValueError(f"同目录 best.pt 的权重 {name} 形状不正确。")
+    return weights
 
 
 def set_reproducible_seed(seed: int) -> None:
@@ -395,13 +477,15 @@ def _move_and_normalize_batch(
     device: torch.device,
     scaler: GlobalFeatureScaler,
 ) -> dict[str, Any]:
-    """将模型所需张量移动到设备，并标准化唯一的全局物理输入。"""
+    """把角度/EI 等模型张量移动到设备，只对全局流速做标准化。"""
 
     moved = dict(batch)
     for key in (
         "positions",
         "single_drag",
         "plant_mask",
+        "plant_angles",
+        "plant_stiffness",
         "global_features",
         "target_drag",
         "raw_target_drag",
@@ -450,6 +534,8 @@ def _forward_model(
         single_drag=batch["single_drag"],
         global_features=batch["global_features"],
         plant_mask=batch["plant_mask"],
+        plant_angles=batch.get("plant_angles"),
+        plant_stiffness=batch.get("plant_stiffness"),
     )
 
 
@@ -587,6 +673,14 @@ def fit_with_early_stopping(
         state = load_checkpoint(
             resume_from, model, optimizer, scheduler, map_location=device
         )
+        # 续训必须恢复同一特征契约及训练集统计，不能让已训练权重使用新标准化。
+        saved_scaler = GlobalFeatureScaler.from_dict(state["scaler"])
+        if (saved_scaler.feature_names != scaler.feature_names
+                or saved_scaler.standardize_mask != scaler.standardize_mask
+                or not np.allclose(saved_scaler.mean, scaler.mean, rtol=1.0e-12, atol=1.0e-12)
+                or not np.allclose(saved_scaler.std, scaler.std, rtol=1.0e-12, atol=1.0e-12)):
+            raise ValueError("resume checkpoint 的 scaler 与当前训练子集或特征契约不一致。")
+        scaler = saved_scaler
         # 断点续训必须继续使用同一份物理基准阻力。若用户在训练中途修改
         # physical.yaml，直接拒绝恢复比把两种物理语义混入一次实验更安全。
         current_physical = complete_checkpoint_metadata.get("physical_config")
@@ -657,10 +751,9 @@ def fit_with_early_stopping(
             # version 3 的 last.pt 不再重复嵌入最佳权重，最佳状态来自同目录 best.pt。
             sibling_best = Path(resume_from).resolve().with_name("best.pt")
             if sibling_best.is_file():
-                sibling_state = torch.load(
-                    sibling_best, map_location="cpu", weights_only=False
+                best_model_state = _validated_sibling_best_state(
+                    sibling_best, state, model, scaler
                 )
-                best_model_state = sibling_state.get("model_state")
             # 兼容此前曾生成的 checkpoint；只读取旧字段，新 last.pt 不再写入它。
             elif state.get("best_model_state") is not None:
                 best_model_state = state["best_model_state"]
@@ -942,8 +1035,9 @@ def predict_dataset(
             masks = batch["plant_mask"].detach().cpu()
             positions = batch["positions"].detach().cpu()
             single_drag = batch["single_drag"].detach().cpu()
-            # plant_angles 仅用于结果审计，不会移动到模型设备或传入 forward。
+            # 逐株原始物理属性已用于 forward，同时保留在输出中供维护者审计。
             plant_angles = raw_batch.get("plant_angles")
+            plant_stiffness = raw_batch.get("plant_stiffness")
             targets = batch["target_drag"].detach().cpu()
             raw_targets = batch.get("raw_target_drag", targets).detach().cpu()
             isolated = (single_drag * masks.to(single_drag.dtype)).sum(dim=1)
@@ -983,9 +1077,11 @@ def predict_dataset(
                             "plant_index": plant_index,
                             "x": float(positions[row_index, plant_index, 0]),
                             "y": float(positions[row_index, plant_index, 1]),
-                            "plant_angle": int(plant_angles[row_index, plant_index])
+                            "plant_angle": float(plant_angles[row_index, plant_index])
                             if plant_angles is not None
-                            else int(metadata["angle"]),
+                            else float(metadata["angle"]),
+                            "plant_stiffness_nm2": float(plant_stiffness[row_index, plant_index])
+                            if plant_stiffness is not None else None,
                             "single_drag": float(single_drag[row_index, plant_index]),
                             "latent_coefficient": float(
                                 coefficients[row_index, plant_index]

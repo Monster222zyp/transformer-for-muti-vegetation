@@ -1,6 +1,7 @@
 output/
 # data 下的原始数据量较大，只为本次修改的 gather 脚本保留版本控制入口。
 data/*
+datasets/
 
 filtered_data/
 summarized_data/
@@ -14,5 +15,7 @@ rotatedplots*/**/*.csv
 rotated_plots*/**/*.csv
 
 artifacts/
+
+dataset.jsonl
 
 input.csv

@@ -1,12 +1,14 @@
 """统一的 sensor 原始数据低通/带通滤波脚本。
 
 支持两种模式：
-1. lowpass：4 阶 Butterworth 低通，对应旧 filter_data.py 的主要功能。
+1. lowpass：默认 5 阶 Butterworth 低通，对应旧 filter_data.py 的主要功能。
 2. bandpass：Hamming 窗 FIR 带通，对应旧 sensor_data_filter_frequency.py。
 
 项目原始 sensor CSV 为无表头、逗号分隔的 6 列，依次映射为
 TX、TY、TZ、FX、FY、FZ。脚本默认递归处理 data 文件夹中的
 sensor_编号_ang角度.csv，并在仓库根目录的 filtered_data 中保留原目录结构。
+新批次的 sensor_编号_round轮次_ang角度.csv 也使用同一处理流程；轮次
+保留在输出文件名中，避免两次采集互相覆盖。
 """
 
 from __future__ import annotations
@@ -73,8 +75,10 @@ make_plots = True
 overwrite_existing = True
 
 SENSOR_COLUMNS = ("TX", "TY", "TZ", "FX", "FY", "FZ")
+# 旧批次没有 round 字段；新批次有 round1、round2 等。两者都必须严格匹配，
+# gather 文件和已经滤波的输出文件不会被误认为原始六轴 sensor 数据。
 SENSOR_FILE_RE = re.compile(
-    r"^sensor_(?P<index>\d+)_ang(?P<angle>-?\d+(?:\.\d+)?)\.csv$",
+    r"^sensor_(?P<index>\d+)(?:_round(?P<round>\d+))?_ang(?P<angle>-?\d+(?:\.\d+)?)\.csv$",
     re.IGNORECASE,
 )
 
@@ -101,7 +105,7 @@ class FilterConfig:
 
 
 def parse_sensor_filename(path: Path) -> tuple[int, float] | None:
-    """从文件名读取 sensor 编号和角度；不是原始 sensor 文件时返回 None。"""
+    """读取 sensor 编号和角度；可选 round 留在文件名中以区分重复采集。"""
 
     match = SENSOR_FILE_RE.fullmatch(path.name)
     if match is None:
@@ -130,7 +134,10 @@ def discover_sensor_files(
         raise FileNotFoundError(f"输入路径不存在：{path}")
     if path.is_file():
         if parse_sensor_filename(path) is None:
-            raise ValueError(f"文件名不符合 sensor_编号_ang角度.csv：{path.name}")
+            raise ValueError(
+                "文件名不符合 sensor_编号[_round轮次]_ang角度.csv："
+                f"{path.name}"
+            )
         return [path]
 
     normalized_excluded_names = {name.casefold() for name in excluded_names}
@@ -493,7 +500,10 @@ def main() -> int:
 
     files = discover_sensor_files(config.input_path, excluded_roots=(config.output_dir,))
     if not files:
-        print(f"未找到合法文件：{config.input_path}/sensor_编号_ang角度.csv")
+        print(
+            "未找到合法文件："
+            f"{config.input_path}/sensor_编号[_round轮次]_ang角度.csv"
+        )
         return 1
 
     success_count = 0

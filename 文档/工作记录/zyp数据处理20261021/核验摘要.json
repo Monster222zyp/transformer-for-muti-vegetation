@@ -1,0 +1,80 @@
+{
+  "dataset_records": 1197,
+  "repeatability_pairs": 1224,
+  "retained_pairs": 1197,
+  "rejected_pairs": 27,
+  "audited_runs": 2448,
+  "noncomparable_pairs": [
+    [
+      10,
+      285,
+      0.4
+    ],
+    [
+      12,
+      120,
+      0.2
+    ],
+    [
+      13,
+      300,
+      0.2
+    ],
+    [
+      15,
+      0,
+      0.3
+    ]
+  ],
+  "repeatability_rejected_pairs": 23,
+  "independently_recomputed_raw_files": 6,
+  "model_loader_records": 1197,
+  "uniform_motion_passed": 2448,
+  "maximum_velocity_cv_percent": 0.040428531562299704,
+  "maximum_velocity_deviation_percent": 0.10346080138485189,
+  "maximum_position_residual_um": 1.7983554136957736,
+  "speed_ranges_m_s": {
+    "0.2": [
+      0.2016076739759403,
+      0.2016080065478909
+    ],
+    "0.3": [
+      0.30241158717831573,
+      0.3024119971067458
+    ],
+    "0.4": [
+      0.40321552474493677,
+      0.4032159238617329
+    ]
+  },
+  "sensor_total_row_counts": [
+    600,
+    800,
+    1800,
+    3000,
+    6400,
+    7600,
+    7800,
+    9200,
+    9400,
+    10000,
+    10200,
+    11800,
+    12000,
+    12200,
+    12400,
+    12600,
+    12800,
+    13000
+  ],
+  "gather_total_row_counts": [
+    1207
+  ],
+  "negative_FX_0_record_count": 0,
+  "repeatability_ratio_percentiles": {
+    "min": 0.0016107031511129698,
+    "median": 2.0593443498810733,
+    "p95": 10.632921461211989,
+    "max": 200.0
+  }
+}

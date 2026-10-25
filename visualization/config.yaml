@@ -8,7 +8,7 @@ paths:
   checkpoint_path: "C:/Users/Mayn/Desktop/myfiles/Transformer project/transformer-for-muti-vegetation/model/artifacts/final_model.pt"
 
   # 输入 JSONL 必须使用 Experiment 汇总脚本生成的逐株数据契约。
-  samples_dataset_path: ../Experiment/output/dataset.jsonl
+  samples_dataset_path: "C:/Users/Mayn/Desktop/myfiles/Transformer project/transformer-for-muti-vegetation/dataset.jsonl"
 
   # 两类 PNG 的输出目录。
   output_directory: output

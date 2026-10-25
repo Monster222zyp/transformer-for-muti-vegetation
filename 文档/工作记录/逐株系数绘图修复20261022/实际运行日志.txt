@@ -1,0 +1,5 @@
+[清理] 已清空输出目录：C:\Users\Mayn\Desktop\myfiles\Transformer project\transformer-for-muti-vegetation\文档\工作记录\逐株系数绘图修复20261022\真实样本预览
+[完成] C:\Users\Mayn\Desktop\myfiles\Transformer project\transformer-for-muti-vegetation\文档\工作记录\逐株系数绘图修复20261022\真实样本预览\row_0000_model_01_angle_000_flow_0p4_point_coefficients.png
+[完成] C:\Users\Mayn\Desktop\myfiles\Transformer project\transformer-for-muti-vegetation\文档\工作记录\逐株系数绘图修复20261022\真实样本预览\row_0000_model_01_angle_000_flow_0p4_gaussian_influence.png
+C:\Users\Mayn\Desktop\myfiles\Transformer project\transformer-for-muti-vegetation\model\hydro\calculated_force.py:94: NumericalStabilityWarning: 抗弯刚度 EI=8.000e-07 N·m² 过低，可能出现数值不稳定
+  result = predict_drag(

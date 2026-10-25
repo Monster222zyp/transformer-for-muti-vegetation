@@ -12,12 +12,55 @@ from pathlib import Path
 from typing import Any
 
 import matplotlib
+import numpy as np
 
 # 必须在导入 pyplot 前选择非交互后端，防止服务器训练时尝试打开图形窗口。
 matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt  # noqa: E402  # 后端必须先于 pyplot 配置。
 
+from .config import DEFAULT_DRAG_PARITY_AXIS_MODE, DRAG_PARITY_AXIS_MODES
 from .metrics import EVALUATION_FLOW_SPEEDS, group_predictions_by_flow_speed
+
+
+# 散点图的默认参数集中在这里，便于统一调整论文图片的尺寸、配色和统计格式。
+DEFAULT_PARITY_PREFIX = "test"
+DEFAULT_PARITY_TITLE = "Test-set drag parity"
+PARITY_MEASUREMENT_FIELD = "raw_target_drag"  # 原始实测值，保留训练归零前的负测量。
+PARITY_FIGURE_SIZE = (6.6, 6.6)  # 每张图的宽、高，单位 inch。
+PARITY_DPI = 300  # PNG 输出分辨率，单位 dots per inch。
+PARITY_AXIS_PADDING = 0.05  # 在当前模式确定的数据范围两端各增加 5% 留白。
+PARITY_AXIS_NOTE_POSITION = (0.5, -0.16)  # 范围说明位于横轴标签下方，使用轴相对坐标。
+PARITY_AXIS_NOTE_FONT_SIZE = 8
+PARITY_AXIS_NOTES = {
+    "independent": "Axis range: independent for each plot",
+    "shared": "Axis range: shared between both plots",
+}
+PARITY_ZERO_SPAN = 1.0  # 所有数值均为零时，用于计算非零坐标留白的参考跨度。
+PARITY_POINT_SIZE = 26.0  # 散点面积，单位 point²。
+PARITY_POINT_ALPHA = 0.65  # 散点透明度，便于观察重叠样本。
+PARITY_REFERENCE_COLOR = "#555555"
+PARITY_REFERENCE_LINEWIDTH = 1.1
+PARITY_GRID_ALPHA = 0.25
+PARITY_GRID_LINEWIDTH = 0.6
+PARITY_STATS_POSITIONS = {
+    # 每项为坐标轴内的相对位置和水平对齐方式；基线框放右侧，避开左上方极值。
+    "model": ((0.04, 0.96), "left"),
+    "baseline": ((0.96, 0.96), "right"),
+}
+PARITY_STATS_FONT_SIZE = 10
+PARITY_STATS_BOX = {"facecolor": "white", "alpha": 0.85, "edgecolor": "none"}
+PARITY_METRIC_SIGNIFICANT_DIGITS = 4
+PARITY_R2_DECIMAL_PLACES = 3
+PARITY_IDENTITY_LABEL = "1:1 reference"
+PARITY_MEASUREMENT_LABEL = "Measured drag (N)"
+PARITY_SERIES = (
+    # 每项依次为文件后缀、预测表字段、标题、纵轴标签和色盲友好配色。
+    ("model", "predicted_drag", "Model prediction", "Predicted drag (N)", "#0072B2"),
+    (
+        "baseline", "isolated_drag", "Summed single-plant baseline",
+        "Summed single-plant drag (N)", "#D55E00",
+    ),
+)
 
 
 def _finite_number(row: Mapping[str, Any], field: str, row_index: int) -> float:
@@ -284,8 +327,140 @@ def write_drag_comparison_by_flow_speed_plot(
     return destination
 
 
+def write_drag_parity_plots(
+    predictions: Sequence[Mapping[str, Any]],
+    output_dir: str | Path,
+    *,
+    prefix: str = DEFAULT_PARITY_PREFIX,
+    title: str = DEFAULT_PARITY_TITLE,
+    axis_mode: str = DEFAULT_DRAG_PARITY_AXIS_MODE,
+) -> dict[str, Path]:
+    """为同一批测试记录分别保存模型和逐株叠加基线的预测—测量散点图。
+
+    参数:
+        predictions: 完整测试集的逐样本预测记录；每条需包含原始实测
+            ``raw_target_drag``、模型预测 ``predicted_drag`` 和逐株力之和
+            ``isolated_drag``。每条记录在每张图中各对应一个点，不排序或抽样。
+        output_dir: 两张 PNG 的保存目录，不存在时自动创建。
+        prefix: 文件名前缀；输出 ``{prefix}_drag_parity_model.png`` 与
+            ``{prefix}_drag_parity_baseline.png``。
+        title: 两张图共用的标题前缀，后接模型或基线名称；英文标签便于论文排版，
+            也避免无中文字体的服务器出现缺字。
+        axis_mode: ``independent`` 按每张图的实测值与该图预测值独立取范围；
+            ``shared`` 按实测值与两组预测值统一取范围。两种模式均保留全部数据，
+            每张图内部的横纵轴范围始终相同，且每单位长度代表相同的 N 数值。
+
+    返回:
+        ``model``、``baseline`` 分别对应已生成 PNG 路径的字典。
+
+    说明:
+        横轴保留原始实验测量，包括训练时被归零的负测量；图内 MAE、RMSE、
+        R² 也使用相同原始测量口径，不直接复用基于 ``target_drag`` 的训练指标。
+        默认两图分别取范围，防止极大的基线预测压缩模型散点；图下注明范围模式，
+        跨图比较绝对误差时应读取坐标刻度及 MAE、RMSE。R² 未定义时显示 undefined。
+
+    异常:
+        ValueError: 坐标模式无效、输入为空、记录不是映射，或必需数值缺失/非有限时抛出。
+    """
+
+    if not predictions:
+        raise ValueError("无法绘制 drag 散点图：predictions 不能为空。")
+    if axis_mode not in DRAG_PARITY_AXIS_MODES:
+        raise ValueError("axis_mode 必须是 independent 或 shared。")
+
+    # 一次性校验两张图要使用的全部数据，防止第二张图才发现输入错误。
+    fields = (PARITY_MEASUREMENT_FIELD, *(series[1] for series in PARITY_SERIES))
+    values: dict[str, list[float]] = {field: [] for field in fields}
+    for row_index, row in enumerate(predictions):
+        if not isinstance(row, Mapping):
+            raise ValueError(f"第 {row_index} 条预测必须是字段字典，实际为 {type(row).__name__}")
+        for field in fields:
+            values[field].append(_finite_number(row, field, row_index))
+
+    # 使用 float64 计算图内指标；不修改预测表，也不改变训练标签的归零策略。
+    measured = np.asarray(values[PARITY_MEASUREMENT_FIELD], dtype=np.float64)
+    # 只有 shared 模式才合并两组预测；独立模式下基线极值不会参与模型图的范围计算。
+    shared_values = (
+        np.concatenate([np.asarray(values[field], dtype=np.float64) for field in fields])
+        if axis_mode == "shared" else None
+    )
+    centered_measurement = measured - measured.mean()
+    total_sum_squares = float(np.sum(centered_measurement**2))
+
+    destination = Path(output_dir)
+    destination.mkdir(parents=True, exist_ok=True)
+    output_paths: dict[str, Path] = {}
+    for name, field, series_title, ylabel, color in PARITY_SERIES:
+        # 两张图分别计算各自的误差；常量实测值或单样本没有可定义的 R²。
+        predicted = np.asarray(values[field], dtype=np.float64)
+        # 每张图的 x、y 同时覆盖本图全部数据与零点，再在两端留白；不裁剪离群点。
+        range_values = (
+            shared_values if shared_values is not None
+            else np.concatenate((measured, predicted))
+        )
+        lower = min(0.0, float(range_values.min()))
+        upper = max(0.0, float(range_values.max()))
+        span = upper - lower if upper > lower else PARITY_ZERO_SPAN
+        padding = span * PARITY_AXIS_PADDING
+        limits = (lower - padding, upper + padding)
+        error = predicted - measured
+        mae = float(np.mean(np.abs(error)))
+        rmse = float(np.sqrt(np.mean(error**2)))
+        r2 = 1.0 - float(np.sum(error**2)) / total_sum_squares if total_sum_squares > 0.0 else math.nan
+        r2_label = f"{r2:.{PARITY_R2_DECIMAL_PLACES}f}" if math.isfinite(r2) else "undefined"
+        statistics = (
+            f"n = {len(measured)}\n"
+            f"MAE = {mae:.{PARITY_METRIC_SIGNIFICANT_DIGITS}g} N\n"
+            f"RMSE = {rmse:.{PARITY_METRIC_SIGNIFICANT_DIGITS}g} N\n"
+            f"$R^2$ = {r2_label}"
+        )
+        output_path = destination / f"{prefix}_drag_parity_{name}.png"
+        figure, axis = plt.subplots(figsize=PARITY_FIGURE_SIZE)
+        try:
+            # 原始每条测试记录都保留；透明散点允许读者看到密集重叠区域。
+            axis.scatter(
+                measured, predicted, s=PARITY_POINT_SIZE,
+                alpha=PARITY_POINT_ALPHA, color=color, edgecolors="none",
+            )
+            axis.plot(
+                limits, limits, linestyle="--", color=PARITY_REFERENCE_COLOR,
+                linewidth=PARITY_REFERENCE_LINEWIDTH, label=PARITY_IDENTITY_LABEL,
+            )
+            axis.set_xlim(limits)
+            axis.set_ylim(limits)
+            axis.set_aspect("equal", adjustable="box")
+            axis.set_xlabel(PARITY_MEASUREMENT_LABEL)
+            axis.set_ylabel(ylabel)
+            axis.set_title(f"{title}\n{series_title}")
+            axis.grid(True, linewidth=PARITY_GRID_LINEWIDTH, alpha=PARITY_GRID_ALPHA)
+            axis.set_axisbelow(True)
+            # 模型统计框在左上，基线统计框在右上，避免基线高估点被文字框覆盖。
+            statistics_position, statistics_alignment = PARITY_STATS_POSITIONS[name]
+            axis.text(
+                *statistics_position, statistics, transform=axis.transAxes,
+                ha=statistics_alignment, va="top", fontsize=PARITY_STATS_FONT_SIZE,
+                bbox=PARITY_STATS_BOX,
+            )
+            axis.legend(loc="lower right")
+            # 明示两图是否共用范围，提醒读者结合刻度和误差指标比较模型与基线。
+            axis.text(
+                *PARITY_AXIS_NOTE_POSITION, PARITY_AXIS_NOTES[axis_mode],
+                transform=axis.transAxes, ha="center", va="top",
+                fontsize=PARITY_AXIS_NOTE_FONT_SIZE, color=PARITY_REFERENCE_COLOR,
+            )
+            figure.tight_layout()
+            figure.savefig(output_path, dpi=PARITY_DPI, format="png")
+        finally:
+            # 正常写图或写入失败时都释放 Figure，避免连续训练时积累图形对象。
+            plt.close(figure)
+        output_paths[name] = output_path
+
+    return output_paths
+
+
 __all__ = [
     "sort_drag_predictions",
     "write_drag_comparison_by_flow_speed_plot",
     "write_drag_comparison_plot",
+    "write_drag_parity_plots",
 ]

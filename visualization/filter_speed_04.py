@@ -1,54 +1,51 @@
-"""只保留 CSV 中 flow_speed 等于 0.4 的行。"""
+"""原地过滤 dataset.jsonl，只保留 flow_speed 等于 0.4 的完整样本。"""
 
 import argparse
-import csv
+import json
 import os
 import tempfile
 from pathlib import Path
 
 
-# 默认处理与本脚本位于同一目录的 summarized_data.csv。
-DEFAULT_CSV = Path(__file__).with_name("summarized_data.csv")
+# 默认处理脚本同目录的 dataset.jsonl；命令行可传入其他路径。
+DEFAULT_JSONL = Path(__file__).with_name("dataset.jsonl")
+TARGET_FLOW_SPEED = 0.4
 
 
-def filter_csv(csv_path: Path) -> tuple[int, int]:
-    """原地过滤 CSV，并返回（保留行数，删除行数）。"""
-    # 临时文件放在原 CSV 所在目录，确保最终替换操作可靠。
-    with csv_path.open("r", encoding="utf-8-sig", newline="") as source:
-        reader = csv.DictReader(source)
-        if not reader.fieldnames or "flow_speed" not in reader.fieldnames:
-            raise ValueError("CSV 中没有 flow_speed 列")
-
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            newline="",
-            dir=csv_path.parent,
-            delete=False,
-            suffix=".csv",
-        ) as temp:
-            temp_path = Path(temp.name)
-            writer = csv.DictWriter(temp, fieldnames=reader.fieldnames)
-            writer.writeheader()
-
-            kept = removed = 0
-            for row in reader:
-                # 转成浮点数后比较，可同时接受 0.4、0.40 等写法。
-                if float(row["flow_speed"]) == 0.4:
-                    writer.writerow(row)
-                    kept += 1
-                else:
-                    removed += 1
-
-    # 只有完整写完临时文件后才替换原文件，避免处理中断损坏数据。
-    os.replace(temp_path, csv_path)
-    return kept, removed
+def filter_jsonl(jsonl_path: Path) -> tuple[int, int]:
+    """jsonl_path 为待原地过滤的文件；返回（保留样本数，删除样本数）。"""
+    temp_path = None
+    try:
+        # 在同目录写临时文件；完整处理成功后才替换原文件。
+        with jsonl_path.open("r", encoding="utf-8-sig") as source:
+            with tempfile.NamedTemporaryFile(
+                "w", encoding="utf-8", dir=jsonl_path.parent,
+                delete=False, suffix=".jsonl",
+            ) as temp:
+                temp_path = Path(temp.name)
+                kept = removed = 0
+                for line in source:
+                    if not line.strip():
+                        continue
+                    sample = json.loads(line)
+                    # 保留完整原始记录，包括嵌套的 plants 和 measurements。
+                    if float(sample["flow_speed"]) == TARGET_FLOW_SPEED:
+                        temp.write(line.rstrip("\r\n") + "\n")
+                        kept += 1
+                    else:
+                        removed += 1
+        os.replace(temp_path, jsonl_path)
+        return kept, removed
+    finally:
+        # 解析失败时仅删除临时文件，原始数据保持不变。
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="只保留 flow_speed 为 0.4 的 CSV 行")
-    parser.add_argument("csv_path", nargs="?", type=Path, default=DEFAULT_CSV, help="待处理的 CSV 路径")
+    parser = argparse.ArgumentParser(description="原地过滤 JSONL，只保留 flow_speed 为 0.4 的样本")
+    parser.add_argument("jsonl_path", nargs="?", type=Path, default=DEFAULT_JSONL, help="待原地过滤的 dataset.jsonl 路径")
     args = parser.parse_args()
 
-    kept_count, removed_count = filter_csv(args.csv_path)
+    kept_count, removed_count = filter_jsonl(args.jsonl_path)
     print(f"完成：保留 {kept_count} 行，删除 {removed_count} 行。")

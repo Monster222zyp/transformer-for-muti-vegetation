@@ -11,9 +11,14 @@ import yaml
 
 
 DEFAULT_TRAINING_MIRROR_AUGMENTATION = True
+# 散点图默认独立取范围；shared 用于需要两图严格共用尺度的展示。
+DEFAULT_DRAG_PARITY_AXIS_MODE = "independent"
+DRAG_PARITY_AXIS_MODES = ("independent", "shared")
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
+    # 训练入口模式：cv 使用自动划分，predefined 使用下方三份独立 JSONL。
+    "mode": "cv",
     "seed": 20260814,
     "data": {
         "dataset_path": "Experiment/output/dataset.jsonl",
@@ -21,7 +26,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "negative_target_policy": "clamp_to_zero",
     },
     "model": {
-        "global_input_dim": 1,
+        "global_input_dim": 3,
+        "global_hidden_dim": 64,
+        "plant_encoder_hidden_dim": 128,
+        "stiffness_reference_nm2": 1.0,
         "d_model": 256,
         "n_heads": 8,
         "n_layers": 4,
@@ -33,7 +41,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "condition_value_on_global": True,
         "condition_relative_value_on_global": True,
         # 正式训练默认使用可微的方向惩罚；HydroTransformer 直接构造时仍默认 none，
-        # 以便旧 checkpoint 和独立调用保留原有双向 attention 语义。
+        # 保留独立构造的双向 attention 语义；旧 Token checkpoint 仍明确拒绝。
         "directional_attention_mode": "soft",
         "directional_soft_activation": "relu",
         "directional_soft_strength": 1.0,
@@ -67,7 +75,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "n_splits": 5,
         "validation_fraction": 0.2,
     },
-    "output": {"artifact_dir": "model/artifacts"},
+    # 三份路径只在 mode=predefined 时使用；None 表示尚未配置。
+    "predefined_split": {
+        "train_dataset_path": None,
+        "validation_dataset_path": None,
+        "test_dataset_path": None,
+    },
+    "output": {
+        "artifact_dir": "model/artifacts",
+        "drag_parity_axis_mode": DEFAULT_DRAG_PARITY_AXIS_MODE,
+    },
 }
 
 
@@ -96,6 +113,9 @@ def load_config(path: str | Path | None) -> dict[str, Any]:
     # 必须使用 YAML 布尔值，避免字符串 "false" 被 Python 当成开启。
     if not isinstance(config["training"]["mirror_augmentation"], bool):
         raise ValueError("training.mirror_augmentation 必须是布尔值 true 或 false。")
+    # 在训练开始和旧产物清理前拒绝未知绘图模式，避免训练结束时才暴露拼写错误。
+    if config["output"]["drag_parity_axis_mode"] not in DRAG_PARITY_AXIS_MODES:
+        raise ValueError("output.drag_parity_axis_mode 必须是 independent 或 shared。")
     return config
 
 
